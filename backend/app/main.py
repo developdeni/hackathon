@@ -32,6 +32,7 @@ from .database import (
 from .copernicus import auto_detect_arable_boundary, fetch_field_satellite_series, fetch_field_risk_grid
 from .analytics import build_risk_zones, classify_land_use
 from .weather import get_field_agro_weather
+from .ai_advisor import analyze_crop_image_bytes, ask_agronomic_advisor
 
 
 # ---------------------------------------------------------------------------
@@ -829,3 +830,52 @@ def get_inspection(inspection_id: str, request: Request, user_id: str = Depends(
     if row is None:
         raise HTTPException(status_code=404, detail="Осмотр не найден")
     return inspection_from_row(row, str(request.base_url))
+
+
+# ---------------------------------------------------------------------------
+# AI Agronomic Advisor & Computer Vision
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ai/diagnose-photo")
+async def ai_diagnose_photo(request: Request) -> dict:
+    content_type = request.headers.get("content-type", "")
+    image_bytes: bytes | None = None
+    filename = "photo.jpg"
+
+    if "application/json" in content_type:
+        body = await request.json()
+        b64 = body.get("photo_base64")
+        if b64:
+            import base64
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(b64)
+            except Exception:
+                image_bytes = None
+            filename = str(body.get("photo_name") or "photo.jpg")
+    else:
+        form = await request.form()
+        photo_field = form.get("photo")
+        if photo_field and hasattr(photo_field, "read"):
+            image_bytes = await photo_field.read()
+            filename = getattr(photo_field, "filename", "photo.jpg") or "photo.jpg"
+
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="Загрузите изображение для анализа")
+
+    return analyze_crop_image_bytes(image_bytes, filename)
+
+
+class AiChatInput(BaseModel):
+    question: str
+    history: list[dict] | None = None
+
+
+@app.post("/api/ai/chat")
+def ai_agronomic_chat(input_data: AiChatInput) -> dict:
+    if not input_data.question.strip():
+        raise HTTPException(status_code=422, detail="Введите вопрос агроному")
+    answer = ask_agronomic_advisor(input_data.question, input_data.history)
+    return {"question": input_data.question, "answer": answer}
+

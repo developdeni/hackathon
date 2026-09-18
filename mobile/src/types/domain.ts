@@ -235,3 +235,28 @@ export type AgroWeather = {
   };
   alerts: AgroAlert[];
 };
+
+export type AiDiagnosisResult = {
+  detected: boolean;
+  crop: string;
+  diagnosis: string;
+  pathogen: string;
+  severity: 'low' | 'moderate' | 'high';
+  confidence: number;
+  affected_area_percent: number;
+  description?: string;
+  recommendation: string;
+  chemicals: string;
+  rate: string;
+  weather_limits: string;
+  yield_loss: string;
+};
+
+export type AiChatMessage = {
+  id: string;
+  sender: 'user' | 'ai';
+  text: string;
+  timestamp: string;
+  diagnosis?: AiDiagnosisResult | null;
+  photoUri?: string | null;
+};
