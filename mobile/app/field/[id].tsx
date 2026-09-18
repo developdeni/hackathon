@@ -28,7 +28,9 @@ import {
   getFieldZones,
   listInspections,
   syncOfflineQueue,
+  CACHE_KEYS,
 } from '../../src/services/api';
+import { getLocalCache, getMemoryCache, saveLocalCache } from '../../src/services/offline';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
 import {
@@ -265,21 +267,56 @@ const historyStyles = StyleSheet.create({
 export default function FieldScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const [field, setField] = useState<Field | null>(null);
-  const [inspections, setInspections] = useState<Inspection[]>([]);
-  const [satellite, setSatellite] = useState<SatelliteData | null>(null);
-  const [zonesData, setZonesData] = useState<ZonesData | null>(null);
-  const [weather, setWeather] = useState<AgroWeather | null>(null);
-  const [classification, setClassification] = useState<LandUseClassification | null>(null);
+
+  // Instant hydration from fast memory cache (0ms perceived latency)
+  const initialField = id ? getMemoryCache<Field>(CACHE_KEYS.FIELD(id)) : null;
+  const initialInspections = id ? getMemoryCache<Inspection[]>(CACHE_KEYS.INSPECTIONS(id)) ?? [] : [];
+  const initialSat = id ? getMemoryCache<SatelliteData>(CACHE_KEYS.SATELLITE(id)) : null;
+  const initialZones = id ? getMemoryCache<ZonesData>(CACHE_KEYS.ZONES(id)) : null;
+  const initialWeather = id ? getMemoryCache<AgroWeather>(CACHE_KEYS.WEATHER(id)) : null;
+  const initialClass = id ? getMemoryCache<LandUseClassification>(CACHE_KEYS.CLASSIFICATION(id)) : null;
+
+  const [field, setField] = useState<Field | null>(initialField);
+  const [inspections, setInspections] = useState<Inspection[]>(initialInspections);
+  const [satellite, setSatellite] = useState<SatelliteData | null>(initialSat);
+  const [zonesData, setZonesData] = useState<ZonesData | null>(initialZones);
+  const [weather, setWeather] = useState<AgroWeather | null>(initialWeather);
+  const [classification, setClassification] = useState<LandUseClassification | null>(initialClass);
   const [mapMode, setMapMode] = useState<MapMode>('zones');
   const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
-  const [selectedZone, setSelectedZone] = useState<RiskZone | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [selectedZone, setSelectedZone] = useState<RiskZone | null>(initialZones?.zones?.[0] ?? null);
+  const [loading, setLoading] = useState(!initialField);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
-    if (!field) setLoading(true);
+
+    // 1. If memory was empty on cold start, try disk cache immediately
+    if (!field) {
+      const cachedField = await getLocalCache<Field>(CACHE_KEYS.FIELD(id));
+      if (cachedField) {
+        setField(cachedField);
+        const [cachedInsp, cachedSat, cachedZones, cachedW, cachedCl] = await Promise.all([
+          getLocalCache<Inspection[]>(CACHE_KEYS.INSPECTIONS(id)),
+          getLocalCache<SatelliteData>(CACHE_KEYS.SATELLITE(id)),
+          getLocalCache<ZonesData>(CACHE_KEYS.ZONES(id)),
+          getLocalCache<AgroWeather>(CACHE_KEYS.WEATHER(id)),
+          getLocalCache<LandUseClassification>(CACHE_KEYS.CLASSIFICATION(id)),
+        ]);
+        if (cachedInsp) setInspections(cachedInsp);
+        if (cachedSat) setSatellite(cachedSat);
+        if (cachedZones) {
+          setZonesData(cachedZones);
+          if (cachedZones.zones.length > 0) setSelectedZone(cachedZones.zones[0]);
+        }
+        if (cachedW) setWeather(cachedW);
+        if (cachedCl) setClassification(cachedCl);
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
+    }
+
     setError(null);
     try {
       void syncOfflineQueue().catch(() => {});
@@ -302,7 +339,7 @@ export default function FieldScreen() {
       if (satRes.status === 'fulfilled') setSatellite(satRes.value);
       if (zonesRes.status === 'fulfilled') {
         setZonesData(zonesRes.value);
-        if (zonesRes.value.zones.length > 0) setSelectedZone(zonesRes.value.zones[0]);
+        if (zonesRes.value.zones.length > 0 && !selectedZone) setSelectedZone(zonesRes.value.zones[0]);
       }
       if (weatherRes.status === 'fulfilled') setWeather(weatherRes.value);
       if (classificationRes.status === 'fulfilled') setClassification(classificationRes.value);
@@ -313,7 +350,7 @@ export default function FieldScreen() {
     } finally {
       setLoading(false);
     }
-  }, [id, field]);
+  }, [id, field, selectedZone]);
 
   useFocusEffect(useCallback(() => { void load(); }, [load]));
 
@@ -793,7 +830,10 @@ export default function FieldScreen() {
           {inspections.map((insp, idx) => (
             <View key={insp.id}>
               <Pressable
-                onPress={() => router.push({ pathname: '/inspection/[id]', params: { id: insp.id } })}
+                onPress={() => {
+                  void saveLocalCache(CACHE_KEYS.INSPECTION(insp.id), insp);
+                  router.push({ pathname: '/inspection/[id]', params: { id: insp.id } });
+                }}
                 style={({ pressed }) => [styles.inspRow, pressed && styles.inspRowPressed]}
               >
                 {insp.photoUrl ? (

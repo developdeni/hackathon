@@ -23,7 +23,9 @@ import {
   listFieldsForProfile,
   listProfiles,
   syncOfflineQueue,
+  CACHE_KEYS,
 } from '../src/services/api';
+import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { FarmProfile, Field } from '../src/types/domain';
@@ -39,10 +41,21 @@ export default function MainScreen() {
   // AI Tools opens by default as requested
   const [activeTab, setActiveTab] = useState<TabKey>(params.tab ?? 'ai_tools');
 
-  const [profiles, setProfiles] = useState<FarmProfile[]>([]);
-  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
-  const [fields, setFields] = useState<Field[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Instant hydration from fast memory cache (0ms perceived latency)
+  const initialProfiles = getMemoryCache<FarmProfile[]>(CACHE_KEYS.PROFILES) ?? [];
+  const initialProfileId =
+    params.profileId ??
+    initialProfiles.find((p) => p.fieldCount > 0)?.id ??
+    initialProfiles[0]?.id ??
+    null;
+  const initialFields = initialProfileId
+    ? getMemoryCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(initialProfileId)) ?? []
+    : [];
+
+  const [profiles, setProfiles] = useState<FarmProfile[]>(initialProfiles);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(initialProfileId);
+  const [fields, setFields] = useState<Field[]>(initialFields);
+  const [loading, setLoading] = useState(initialProfiles.length === 0);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,9 +73,28 @@ export default function MainScreen() {
   }, [params.tab]);
 
   const load = useCallback(async () => {
+    // 1. If memory was empty on cold start, hydrate from disk immediately
     if (profiles.length === 0) {
-      setLoading(true);
+      const cachedProfiles = await getLocalCache<FarmProfile[]>(CACHE_KEYS.PROFILES);
+      if (cachedProfiles && cachedProfiles.length > 0) {
+        setProfiles(cachedProfiles);
+        const nextId =
+          params.profileId ??
+          selectedProfileId ??
+          cachedProfiles.find((p) => p.fieldCount > 0)?.id ??
+          cachedProfiles[0]?.id ??
+          null;
+        setSelectedProfileId(nextId);
+        if (nextId) {
+          const cachedFields = await getLocalCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(nextId));
+          if (cachedFields) setFields(cachedFields);
+        }
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
     }
+
     setError(null);
     try {
       // In the background, flush any pending inspections from offline outbox
@@ -85,8 +117,6 @@ export default function MainScreen() {
         setProfiles(pList);
         setSelectedProfileId(nextProfileId);
         setFields(fieldItems);
-      } else {
-        throw profileItems.reason;
       }
     } catch (nextError) {
       setConnected(false);
@@ -114,12 +144,20 @@ export default function MainScreen() {
 
   async function chooseProfile(profileId: string) {
     setSelectedProfileId(profileId);
-    setLoading(true);
+    const cached = getMemoryCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(profileId));
+    if (cached) {
+      setFields(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
       setFields(await listFieldsForProfile(profileId));
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить участки профиля');
+      if (!cached) {
+        setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить участки профиля');
+      }
     } finally {
       setLoading(false);
     }

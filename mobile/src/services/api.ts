@@ -141,7 +141,7 @@ export function getServerHealth() {
 // Fields & Profiles (Offline Cache-First)
 // ---------------------------------------------------------------------------
 
-const CACHE_KEYS = {
+export const CACHE_KEYS = {
   PROFILES: 'profiles',
   FIELDS_PROFILE: (profileId: string) => `fields_${profileId}`,
   FIELD: (id: string) => `field_${id}`,
@@ -182,6 +182,10 @@ export async function listFieldsForProfile(profileId: string): Promise<Field[]> 
   try {
     const data = await apiFetch<Field[]>(`/api/fields?profile_id=${encodeURIComponent(profileId)}`);
     void saveLocalCache(cacheKey, data);
+    // Prime individual field cache in RAM/storage for instant 0ms tap response
+    for (const f of data) {
+      void saveLocalCache(CACHE_KEYS.FIELD(f.id), f);
+    }
     return data;
   } catch (err) {
     const cached = await getLocalCache<Field[]>(cacheKey);

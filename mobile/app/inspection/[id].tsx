@@ -7,30 +7,42 @@ import { Badge } from '../../src/components/Badge';
 import { Card } from '../../src/components/Card';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Screen } from '../../src/components/Screen';
-import { getField, getInspection } from '../../src/services/api';
+import { CACHE_KEYS, getField, getInspection } from '../../src/services/api';
+import { getMemoryCache } from '../../src/services/offline';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies, typography } from '../../src/theme/typography';
 import { Field, Inspection } from '../../src/types/domain';
 
 export default function InspectionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [inspection, setInspection] = useState<Inspection | null>(null);
-  const [field, setField] = useState<Field | null>(null);
-  const [loading, setLoading] = useState(true);
+
+  // Instant hydration from memory cache (0ms perceived latency)
+  const initialInsp = id ? getMemoryCache<Inspection>(CACHE_KEYS.INSPECTION(id)) : null;
+  const initialField = initialInsp?.fieldId
+    ? getMemoryCache<Field>(CACHE_KEYS.FIELD(initialInsp.fieldId))
+    : null;
+
+  const [inspection, setInspection] = useState<Inspection | null>(initialInsp);
+  const [field, setField] = useState<Field | null>(initialField);
+  const [loading, setLoading] = useState(!initialInsp);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
-    setLoading(true);
+    if (!inspection) setLoading(true);
     getInspection(id)
       .then(async (item) => {
         setInspection(item);
         setField(await getField(item.fieldId));
         setError(null);
       })
-      .catch((nextError) => setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить осмотр'))
+      .catch((nextError) => {
+        if (!inspection) {
+          setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить осмотр');
+        }
+      })
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, inspection]);
 
   if (loading) {
     return (

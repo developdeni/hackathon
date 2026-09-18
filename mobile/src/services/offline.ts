@@ -16,10 +16,22 @@ export interface PendingInspection {
 const CACHE_PREFIX = '@tanap_cache:';
 const OUTBOX_KEY = '@tanap_pending_inspections';
 
+// In-memory RAM cache for 0ms synchronous access
+const memoryCache = new Map<string, unknown>();
+
+export function getMemoryCache<T>(key: string): T | null {
+  return (memoryCache.get(key) as T) ?? null;
+}
+
+export function setMemoryCache<T>(key: string, data: unknown): void {
+  memoryCache.set(key, data);
+}
+
 /**
- * Saves arbitrary data to local offline cache
+ * Saves arbitrary data to local offline cache (memory + AsyncStorage)
  */
 export async function saveLocalCache<T>(key: string, data: T): Promise<void> {
+  memoryCache.set(key, data);
   try {
     const payload = JSON.stringify({
       timestamp: Date.now(),
@@ -32,14 +44,19 @@ export async function saveLocalCache<T>(key: string, data: T): Promise<void> {
 }
 
 /**
- * Retrieves data from local offline cache
+ * Retrieves data from local offline cache (fast RAM tier first, then disk)
  */
 export async function getLocalCache<T>(key: string): Promise<T | null> {
+  if (memoryCache.has(key)) {
+    return memoryCache.get(key) as T;
+  }
   try {
     const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}${key}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed.data as T;
+    const data = parsed.data as T;
+    memoryCache.set(key, data);
+    return data;
   } catch {
     return null;
   }
