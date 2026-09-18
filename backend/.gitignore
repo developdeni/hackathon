@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+data/tanap.db
+data/tanap.db-shm
+data/tanap.db-wal
+data/uploads/*
+!data/uploads/.gitkeep

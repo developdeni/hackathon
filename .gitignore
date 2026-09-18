@@ -1,0 +1,7 @@
+.DS_Store
+
+# Local AI tooling installed for this workspace
+.agents/
+skills/
+no-slop-ui/
+skills-lock.json
