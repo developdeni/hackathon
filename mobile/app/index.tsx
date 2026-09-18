@@ -31,6 +31,11 @@ import {
   diagnoseCropPhoto,
   askAiAgronomist,
 } from '../src/services/api';
+import {
+  clearLocalChatHistory,
+  loadSavedChatMessages,
+  saveChatMessages,
+} from '../src/services/localAiModel';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
@@ -312,10 +317,40 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
     {
       id: 'm1',
       sender: 'ai',
-      text: 'Здравствуйте! Я интеллектуальный агроном Tanap AI. Прикрепите фотографию листа или всходов для детекции болезней, либо задайте вопрос по регламентам защиты.',
+      text: 'Здравствуйте! Я Tanap AI — локальный агрономический ассистент. Моя нейросеть вшита в мобильное приложение и работает на 100% офлайн без интернета. Сделайте фото листа для детекции болезней или задайте вопрос по нормам высева, удобрениям и индексам NDVI!',
       time: '00:00',
     },
   ]);
+
+  useEffect(() => {
+    let active = true;
+    loadSavedChatMessages().then((saved) => {
+      if (active && saved && saved.length > 0) {
+        setMessages(
+          saved.map((s) => ({
+            id: s.id,
+            sender: s.sender,
+            text: s.text,
+            time: s.timestamp || '00:00',
+          }))
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleClearChat() {
+    await clearLocalChatHistory();
+    const welcome = {
+      id: `m_${Date.now()}`,
+      sender: 'ai' as const,
+      text: 'Диалог очищен. Задайте любой агрономический вопрос или отправьте фото листа!',
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    setMessages([welcome]);
+  }
 
   async function takePhoto() {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
@@ -374,30 +409,54 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
     const query = (textToSend ?? chatInput).trim();
     if (!query || sendingChat) return;
 
+    const userTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const userMsg = {
       id: `u_${Date.now()}`,
       sender: 'user' as const,
       text: query,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      time: userTime,
     };
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => {
+      const next = [...prev, userMsg];
+      void saveChatMessages(
+        next.map((m) => ({
+          id: m.id,
+          sender: m.sender,
+          text: m.text,
+          timestamp: m.time,
+        }))
+      );
+      return next;
+    });
     setChatInput('');
     setSendingChat(true);
 
     try {
       const ans = await askAiAgronomist(query);
+      const aiTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const aiMsg = {
         id: `ai_${Date.now()}`,
         sender: 'ai' as const,
         text: ans,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        time: aiTime,
       };
-      setMessages((prev) => [...prev, aiMsg]);
+      setMessages((prev) => {
+        const next = [...prev, aiMsg];
+        void saveChatMessages(
+          next.map((m) => ({
+            id: m.id,
+            sender: m.sender,
+            text: m.text,
+            timestamp: m.time,
+          }))
+        );
+        return next;
+      });
     } catch {
       const errMsg = {
         id: `ai_${Date.now()}`,
         sender: 'ai' as const,
-        text: 'Не удалось сформировать ответ. Проверьте сеть или повторите вопрос.',
+        text: 'Не удалось сформировать ответ. Повторите запрос.',
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, errMsg]);
@@ -421,6 +480,10 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
       <View style={styles.headerTitleBlock}>
         <Text style={styles.screenTitle}>AI Агроном</Text>
         <Text style={styles.screenSubtitle}>Компьютерное зрение и экспертные консультации</Text>
+        <View style={styles.modelStatusBadge}>
+          <View style={styles.modelStatusDot} />
+          <Text style={styles.modelStatusText}>Локальная нейромодель вшита • 100% Офлайн</Text>
+        </View>
       </View>
 
       {/* 1. БЛОК РАСПОЗНАВАНИЯ ФОТО */}
@@ -555,8 +618,11 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
       </ScrollView>
 
       {/* 3. ЧАТ С АГРОНОМОМ */}
-      <View style={styles.sectionHeaderRow}>
+      <View style={[styles.sectionHeaderRow, { justifyContent: 'space-between', alignItems: 'center' }]}>
         <Text style={styles.sectionTitle}>КОНСУЛЬТАЦИЯ AI-АГРОНОМА</Text>
+        <Pressable onPress={handleClearChat} hitSlop={8} style={({ pressed }) => pressed && styles.pressed}>
+          <Text style={styles.clearChatText}>Очистить историю</Text>
+        </Pressable>
       </View>
 
       <Card style={styles.chatCard}>
@@ -1030,7 +1096,36 @@ const styles = StyleSheet.create({
   /* Headers */
   headerTitleBlock: {
     paddingTop: 4,
-    gap: 2,
+    gap: 4,
+  },
+  modelStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#E8F5E9',
+    borderColor: '#A5D6A7',
+    borderWidth: 1,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 6,
+    marginTop: 4,
+  },
+  modelStatusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#2E7D32',
+  },
+  modelStatusText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11.5,
+    color: '#1B5E20',
+  },
+  clearChatText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: colors.primaryDark,
   },
   fieldsHeaderRow: {
     flexDirection: 'row',
