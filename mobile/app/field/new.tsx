@@ -236,8 +236,16 @@ export default function NewFieldScreen() {
 
   async function autoBoundaryFromSatellite(seedOverride?: Coordinate) {
     if (segmenting) return;
-    const center = seedOverride ?? autoSeed ?? parseCenter(centerLat, centerLng) ?? getBounds(boundary).center;
+    const centerCandidate = seedOverride ?? autoSeed ?? parseCenter(centerLat, centerLng) ?? getBounds(boundary).center;
+    const safeLat = Number.isFinite(centerCandidate?.latitude) ? centerCandidate.latitude : DEFAULT_CENTER.latitude;
+    const safeLng = Number.isFinite(centerCandidate?.longitude) ? centerCandidate.longitude : DEFAULT_CENTER.longitude;
+    const center: Coordinate = { latitude: safeLat, longitude: safeLng };
+
     const size = estimateWidthHeight(boundary);
+    // Clamp radius safely between 300m and 2400m to prevent out-of-range or huge bounding boxes
+    const rawRadius = Math.max(Math.max(size.widthM, size.heightM) * 1.15, 600);
+    const safeRadius = Math.max(300, Math.min(Number.isFinite(rawRadius) ? rawRadius : 700, 2400));
+
     setAutoSeed(center);
     setAutoResult(null);
     setSegmenting(true);
@@ -245,7 +253,7 @@ export default function NewFieldScreen() {
       const result = await detectFieldBoundary({
         latitude: center.latitude,
         longitude: center.longitude,
-        radiusMeters: Math.max(Math.max(size.widthM, size.heightM) * 1.15, 500),
+        radiusMeters: Math.round(safeRadius),
       });
       const nextBoundary = normalizeBoundary(result.boundary);
       setBoundary(nextBoundary);
@@ -273,7 +281,9 @@ export default function NewFieldScreen() {
     setBoundary((current) => {
       const next = [...current];
       next[index] = { ...next[index], [key]: numeric };
-      syncMetaFromBoundary(next);
+      if (Math.abs(numeric) <= 180) {
+        syncMetaFromBoundary(next);
+      }
       return next;
     });
   }
@@ -750,16 +760,20 @@ function normalizeBoundary(points: Coordinate[]): Coordinate[] {
 }
 
 function getBounds(points: Coordinate[]) {
-  const latitudes = points.map((point) => point.latitude);
-  const longitudes = points.map((point) => point.longitude);
+  const valid = points.filter(
+    (point) => point && Number.isFinite(point.latitude) && Number.isFinite(point.longitude)
+  );
+  const pts = valid.length > 0 ? valid : [DEFAULT_CENTER];
+  const latitudes = pts.map((point) => point.latitude);
+  const longitudes = pts.map((point) => point.longitude);
   const minLat = Math.min(...latitudes);
   const maxLat = Math.max(...latitudes);
   const minLng = Math.min(...longitudes);
   const maxLng = Math.max(...longitudes);
   return {
     center: { latitude: (minLat + maxLat) / 2, longitude: (minLng + maxLng) / 2 },
-    latDelta: maxLat - minLat,
-    lngDelta: maxLng - minLng,
+    latDelta: Math.max(maxLat - minLat, 0.001),
+    lngDelta: Math.max(maxLng - minLng, 0.001),
   };
 }
 

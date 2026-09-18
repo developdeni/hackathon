@@ -50,7 +50,17 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 20_000)
       let message = `Ошибка сервера: ${response.status}`;
       try {
         const body = await response.json();
-        if (typeof body.detail === 'string') message = body.detail;
+        if (typeof body.detail === 'string') {
+          message = body.detail;
+        } else if (Array.isArray(body.detail)) {
+          message = body.detail
+            .map((item: { loc?: string[]; msg?: string }) => {
+              const field = item.loc ? item.loc.filter((l) => l !== 'body').join('.') : '';
+              return field ? `${field}: ${item.msg}` : item.msg;
+            })
+            .filter(Boolean)
+            .join('; ');
+        }
       } catch {
         // The server did not return JSON.
       }

@@ -70,9 +70,9 @@ class CreateFieldInput(BaseModel):
 
 
 class AutoBoundaryInput(BaseModel):
-    latitude: float
-    longitude: float
-    radiusMeters: float = PydanticField(default=700, ge=250, le=2500)
+    latitude: float = PydanticField(ge=-90, le=90)
+    longitude: float = PydanticField(ge=-180, le=180)
+    radiusMeters: float = PydanticField(default=700.0, ge=10.0, le=100_000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -641,10 +641,11 @@ async def get_field_classification(field_id: str, user_id: str = Depends(require
 @app.post("/api/fields/auto-boundary")
 async def detect_field_boundary(payload: AutoBoundaryInput, user_id: str = Depends(require_user)) -> dict:
     try:
+        clamped_radius = max(250.0, min(float(payload.radiusMeters or 700.0), 3500.0))
         return await auto_detect_arable_boundary(
             payload.latitude,
             payload.longitude,
-            payload.radiusMeters,
+            clamped_radius,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
