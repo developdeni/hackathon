@@ -317,7 +317,7 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
     {
       id: 'm1',
       sender: 'ai',
-      text: 'Здравствуйте! Я Tanap AI — локальный агрономический ассистент. Моя нейросеть вшита в мобильное приложение и работает на 100% офлайн без интернета. Сделайте фото листа для детекции болезней или задайте вопрос по нормам высева, удобрениям и индексам NDVI!',
+      text: 'Здравствуйте! Я Tanap AI — агрономический ассистент на базе модели Hugging Face CropGuard. Модель скачана и вшита в приложение, работает на 100% офлайн без интернета. Сделайте фото листа для детекции болезней или задайте вопрос по нормам высева, удобрениям и индексам NDVI!',
       time: '00:00',
     },
   ]);
@@ -482,7 +482,7 @@ function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void })
         <Text style={styles.screenSubtitle}>Компьютерное зрение и экспертные консультации</Text>
         <View style={styles.modelStatusBadge}>
           <View style={styles.modelStatusDot} />
-          <Text style={styles.modelStatusText}>Локальная нейромодель вшита • 100% Офлайн</Text>
+          <Text style={styles.modelStatusText}>Hugging Face CropGuard & Agro-SLM • 100% Офлайн</Text>
         </View>
       </View>
 
