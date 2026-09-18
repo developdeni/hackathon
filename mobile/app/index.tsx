@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Text } from '../src/components/AppText';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
+import { Text } from '../src/components/AppText';
 import { Avatar } from '../src/components/Avatar';
 import { Badge } from '../src/components/Badge';
 import { Card } from '../src/components/Card';
 import { EmptyState } from '../src/components/EmptyState';
-import { Screen } from '../src/components/Screen';
 import { useAuth } from '../src/contexts/AuthContext';
 import {
   deleteField,
@@ -19,10 +26,17 @@ import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { FarmProfile, Field } from '../src/types/domain';
 
-export default function FieldsScreen() {
+type TabKey = 'ai_tools' | 'fields' | 'profile';
+
+export default function MainScreen() {
   const router = useRouter();
-  const { user } = useAuth();
-  const params = useLocalSearchParams<{ profileId?: string }>();
+  const insets = useSafeAreaInsets();
+  const { user, logout, refreshUser, isLoading: isAuthLoading } = useAuth();
+  const params = useLocalSearchParams<{ profileId?: string; tab?: TabKey }>();
+
+  // AI Tools is the default open tab as requested
+  const [activeTab, setActiveTab] = useState<TabKey>(params.tab ?? 'ai_tools');
+
   const [profiles, setProfiles] = useState<FarmProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [fields, setFields] = useState<Field[]>([]);
@@ -33,8 +47,15 @@ export default function FieldsScreen() {
   useEffect(() => {
     if (params.profileId) {
       setSelectedProfileId(params.profileId);
+      setActiveTab('fields');
     }
   }, [params.profileId]);
+
+  useEffect(() => {
+    if (params.tab) {
+      setActiveTab(params.tab);
+    }
+  }, [params.tab]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -56,11 +77,16 @@ export default function FieldsScreen() {
     }
   }, [params.profileId, selectedProfileId]);
 
-  useFocusEffect(useCallback(() => { void load(); }, [load]));
+  useFocusEffect(
+    useCallback(() => {
+      void load();
+      void refreshUser();
+    }, [load, refreshUser])
+  );
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null,
-    [profiles, selectedProfileId],
+    [profiles, selectedProfileId]
   );
   const totalArea = fields.reduce((sum, field) => sum + field.areaHa, 0);
   const inspectionCount = fields.reduce((sum, field) => sum + field.inspectionCount, 0);
@@ -81,7 +107,7 @@ export default function FieldsScreen() {
   function confirmDelete(field: Field) {
     Alert.alert(
       'Удалить участок?',
-      `Участок «${field.name}» и его осмотры будут удалены из локальной базы на ноутбуке.`,
+      `Участок «${field.name}» и его осмотры будут удалены.`,
       [
         { text: 'Отмена', style: 'cancel' },
         {
@@ -91,7 +117,7 @@ export default function FieldsScreen() {
             void removeField(field.id);
           },
         },
-      ],
+      ]
     );
   }
 
@@ -105,59 +131,322 @@ export default function FieldsScreen() {
   }
 
   return (
-    <Screen contentStyle={styles.screen}>
-      <View style={styles.header}>
-        <View style={styles.headerMain}>
+    <SafeAreaView style={styles.safeContainer} edges={['top']}>
+      {/* Tab content area */}
+      <View style={styles.tabContentArea}>
+        {activeTab === 'ai_tools' && (
+          <AiToolsView onNavigateToFields={() => setActiveTab('fields')} />
+        )}
+
+        {activeTab === 'fields' && (
+          <FieldsView
+            profiles={profiles}
+            selectedProfile={selectedProfile}
+            fields={fields}
+            loading={loading}
+            connected={connected}
+            error={error}
+            totalArea={totalArea}
+            inspectionCount={inspectionCount}
+            onChooseProfile={chooseProfile}
+            onRefresh={load}
+            onDeleteField={confirmDelete}
+            onNewProfile={() => router.push('/profile/new')}
+            onNewField={() => {
+              if (selectedProfile) {
+                router.push({ pathname: '/field/new', params: { profileId: selectedProfile.id } });
+              }
+            }}
+            onOpenField={(fieldId) => router.push({ pathname: '/field/[id]', params: { id: fieldId } })}
+          />
+        )}
+
+        {activeTab === 'profile' && (
+          <ProfileView
+            user={user}
+            isLoading={isAuthLoading}
+            onLogout={logout}
+            onNewProfile={() => router.push('/profile/new')}
+          />
+        )}
+      </View>
+
+      {/* BOTTOM NAVIGATION BAR: AI Tools (left) | Участки (center) | Профиль (right) */}
+      <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+        <Pressable
+          onPress={() => setActiveTab('ai_tools')}
+          style={({ pressed }) => [
+            styles.tabItem,
+            activeTab === 'ai_tools' && styles.tabItemActive,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={styles.tabIcon}>✨</Text>
+          <Text
+            style={[
+              styles.tabLabel,
+              activeTab === 'ai_tools' && styles.tabLabelActive,
+            ]}
+          >
+            AI Tools
+          </Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setActiveTab('fields')}
+          style={({ pressed }) => [
+            styles.tabItem,
+            activeTab === 'fields' && styles.tabItemActive,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={styles.tabIcon}>🌾</Text>
+          <Text
+            style={[
+              styles.tabLabel,
+              activeTab === 'fields' && styles.tabLabelActive,
+            ]}
+          >
+            Участки
+          </Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setActiveTab('profile')}
+          style={({ pressed }) => [
+            styles.tabItem,
+            activeTab === 'profile' && styles.tabItemActive,
+            pressed && styles.pressed,
+          ]}
+        >
+          <Text style={styles.tabIcon}>👤</Text>
+          <Text
+            style={[
+              styles.tabLabel,
+              activeTab === 'profile' && styles.tabLabelActive,
+            ]}
+          >
+            Профиль
+          </Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+/* =========================================================================
+   1. AI TOOLS VIEW (Default Tab — "В разработке")
+   ========================================================================= */
+function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void }) {
+  return (
+    <ScrollView
+      contentContainerStyle={styles.scrollContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <View style={styles.headerTitleBlock}>
+        <Text style={styles.screenTitle}>AI Tools</Text>
+        <Text style={styles.screenSubtitle}>
+          Нейросетевая платформа точного земледелия
+        </Text>
+      </View>
+
+      {/* Main Status Hero Card */}
+      <Card style={styles.aiHeroCard}>
+        <View style={styles.aiHeroBadgeRow}>
+          <View style={styles.inDevBadge}>
+            <View style={styles.inDevDot} />
+            <Text style={styles.inDevBadgeText}>В РАЗРАБОТКЕ</Text>
+          </View>
+          <Text style={styles.aiVersionText}>v2.0 Beta</Text>
+        </View>
+
+        <Text style={styles.aiHeroTitle}>Интеллектуальные сервисы Tanap AI</Text>
+        <Text style={styles.aiHeroDescription}>
+          Набор передовых алгоритмов компьютерного зрения и спутникового машинного обучения
+          для максимальной эффективности каждого гектара.
+        </Text>
+
+        <Pressable
+          onPress={onNavigateToFields}
+          style={({ pressed }) => [styles.aiHeroButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.aiHeroButtonText}>Перейти к моим участкам →</Text>
+        </Pressable>
+      </Card>
+
+      {/* Planned AI Modules */}
+      <View style={styles.sectionHeaderRow}>
+        <Text style={styles.sectionTitle}>МОДУЛИ В РАЗРАБОТКЕ</Text>
+      </View>
+
+      <Card style={styles.moduleCard}>
+        <View style={styles.moduleHeader}>
+          <View style={styles.moduleIconBox}>
+            <Text style={styles.moduleIcon}>🌿</Text>
+          </View>
+          <View style={styles.moduleTitleBox}>
+            <Text style={styles.moduleTitle}>Детекция сорняков и болезней</Text>
+            <Text style={styles.moduleTag}>Computer Vision • YOLOv8</Text>
+          </View>
+        </View>
+        <Text style={styles.moduleText}>
+          Автоматическое распознавание очагов сорной растительности, вредителей и процента
+          поражения культуры по загруженным фото осмотров.
+        </Text>
+        <View style={styles.moduleFooter}>
+          <Text style={styles.moduleStatus}>Статус: Дообучение модели на культурах РК</Text>
+        </View>
+      </Card>
+
+      <Card style={styles.moduleCard}>
+        <View style={styles.moduleHeader}>
+          <View style={styles.moduleIconBox}>
+            <Text style={styles.moduleIcon}>💧</Text>
+          </View>
+          <View style={styles.moduleTitleBox}>
+            <Text style={styles.moduleTitle}>Спутниковый радар стресса (SAR)</Text>
+            <Text style={styles.moduleTag}>Sentinel-1 • Влагообеспеченность</Text>
+          </View>
+        </View>
+        <Text style={styles.moduleText}>
+          Всепогодный мониторинг влажности корнеобитаемого слоя и дефицита влаги сквозь плотную
+          облачность в критические фазы налива колоса.
+        </Text>
+        <View style={styles.moduleFooter}>
+          <Text style={styles.moduleStatus}>Статус: Интеграция радиометрической калибровки</Text>
+        </View>
+      </Card>
+
+      <Card style={styles.moduleCard}>
+        <View style={styles.moduleHeader}>
+          <View style={styles.moduleIconBox}>
+            <Text style={styles.moduleIcon}>🚜</Text>
+          </View>
+          <View style={styles.moduleTitleBox}>
+            <Text style={styles.moduleTitle}>Карты дифф. внесения (VRA)</Text>
+            <Text style={styles.moduleTag}>Зонирование • ISOXML / Shapefile</Text>
+          </View>
+        </View>
+        <Text style={styles.moduleText}>
+          Автогенерация карт-заданий для опрыскивателей и разбрасывателей удобрений на основе
+          индекса вегетации NDVI и рельефа поля.
+        </Text>
+        <View style={styles.moduleFooter}>
+          <Text style={styles.moduleStatus}>Статус: Разработка форматов экспорта</Text>
+        </View>
+      </Card>
+
+      <Card style={styles.moduleCard}>
+        <View style={styles.moduleHeader}>
+          <View style={styles.moduleIconBox}>
+            <Text style={styles.moduleIcon}>📈</Text>
+          </View>
+          <View style={styles.moduleTitleBox}>
+            <Text style={styles.moduleTitle}>Прогнозирование урожайности</Text>
+            <Text style={styles.moduleTag}>ML Regression • GDD + NDVI</Text>
+          </View>
+        </View>
+        <Text style={styles.moduleText}>
+          Предиктивная модель прогноза валового сбора по динамике накопления биомассы и
+          сумме эффективных температур за вегетационный период.
+        </Text>
+        <View style={styles.moduleFooter}>
+          <Text style={styles.moduleStatus}>Статус: Калибровка на исторических данных</Text>
+        </View>
+      </Card>
+    </ScrollView>
+  );
+}
+
+/* =========================================================================
+   2. FIELDS VIEW (Profiles at the very top, list of fields)
+   ========================================================================= */
+interface FieldsViewProps {
+  profiles: FarmProfile[];
+  selectedProfile: FarmProfile | null;
+  fields: Field[];
+  loading: boolean;
+  connected: boolean;
+  error: string | null;
+  totalArea: number;
+  inspectionCount: number;
+  onChooseProfile: (id: string) => void;
+  onRefresh: () => void;
+  onDeleteField: (field: Field) => void;
+  onNewProfile: () => void;
+  onNewField: () => void;
+  onOpenField: (id: string) => void;
+}
+
+function FieldsView({
+  profiles,
+  selectedProfile,
+  fields,
+  loading,
+  connected,
+  error,
+  totalArea,
+  inspectionCount,
+  onChooseProfile,
+  onRefresh,
+  onDeleteField,
+  onNewProfile,
+  onNewField,
+  onOpenField,
+}: FieldsViewProps) {
+  return (
+    <ScrollView
+      contentContainerStyle={styles.scrollContent}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* 1. ПРОФИЛИ В САМОМ ВВЕРХУ (прям в самом верху экрана) */}
+      <View style={styles.topProfilesSection}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.profileSegmentRow}
+        >
+          {profiles.map((profile) => {
+            const selected = profile.id === selectedProfile?.id;
+            return (
+              <Pressable
+                key={profile.id}
+                onPress={() => onChooseProfile(profile.id)}
+                style={[styles.profileSegmentTab, selected && styles.profileSegmentTabActive]}
+              >
+                <Text
+                  style={[styles.profileSegmentText, selected && styles.profileSegmentTextActive]}
+                  numberOfLines={1}
+                >
+                  {profile.name}
+                </Text>
+              </Pressable>
+            );
+          })}
+          <Pressable
+            onPress={onNewProfile}
+            style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
+          >
+            <Text style={styles.addChipText}>+ профиль</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+
+      {/* 2. Заголовок раздела "Участки" и статус сервера (без значка профиля!) */}
+      <View style={styles.fieldsHeaderRow}>
+        <View style={styles.fieldsHeaderTitleWrap}>
           <Text style={styles.screenTitle}>Участки</Text>
           <Text style={styles.screenSubtitle}>
             {selectedProfile ? `${selectedProfile.name} • ${selectedProfile.region || 'регион не указан'}` : 'Профиль не выбран'}
           </Text>
         </View>
-        <View style={styles.headerRight}>
+        <View style={styles.connectionBadge}>
           <View style={[styles.statusDot, connected ? styles.statusDotOnline : styles.statusDotOffline]} />
-          <Pressable
-            onPress={() => router.push('/profile/me')}
-            style={({ pressed }) => [styles.avatarButton, pressed && styles.pressed]}
-          >
-            {user ? (
-              <Avatar name={user.name} size={36} />
-            ) : (
-              <View style={styles.avatarPlaceholder} />
-            )}
-          </Pressable>
+          <Text style={styles.connectionText}>{connected ? 'Онлайн' : 'Офлайн'}</Text>
         </View>
       </View>
 
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.profileSegmentRow}
-      >
-        {profiles.map((profile) => {
-          const selected = profile.id === selectedProfile?.id;
-          return (
-            <Pressable
-              key={profile.id}
-              onPress={() => void chooseProfile(profile.id)}
-              style={[styles.profileSegmentTab, selected && styles.profileSegmentTabActive]}
-            >
-              <Text
-                style={[styles.profileSegmentText, selected && styles.profileSegmentTextActive]}
-                numberOfLines={1}
-              >
-                {profile.name}
-              </Text>
-            </Pressable>
-          );
-        })}
-        <Pressable
-          onPress={() => router.push('/profile/new')}
-          style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
-        >
-          <Text style={styles.addChipText}>+ профиль</Text>
-        </Pressable>
-      </ScrollView>
-
+      {/* Сводная карточка */}
       <Card style={styles.summaryCard}>
         <SummaryCell value={fields.length} label="участков" />
         <View style={styles.summaryDivider} />
@@ -166,22 +455,24 @@ export default function FieldsScreen() {
         <SummaryCell value={inspectionCount} label="осмотров" />
       </Card>
 
+      {/* Кнопки действий */}
       <View style={styles.actionsRow}>
         <Pressable
           disabled={!selectedProfile}
-          onPress={() => selectedProfile && router.push({ pathname: '/field/new', params: { profileId: selectedProfile.id } })}
+          onPress={onNewField}
           style={({ pressed }) => [styles.primaryButton, (!selectedProfile || pressed) && styles.buttonPressed]}
         >
           <Text style={styles.primaryButtonText}>Добавить участок</Text>
         </Pressable>
-        <Pressable onPress={load} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
+        <Pressable onPress={onRefresh} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
           <Text style={styles.secondaryButtonText}>Обновить</Text>
         </Pressable>
       </View>
 
+      {/* Список участков */}
       <View style={styles.sectionHeaderRow}>
         <Text style={styles.sectionTitle}>СПИСОК УЧАСТКОВ</Text>
-        <Text style={styles.sectionHint} numberOfLines={1}>удержите, чтобы удалить</Text>
+        <Text style={styles.sectionHint} numberOfLines={1}>удержите для удаления</Text>
       </View>
 
       {loading ? (
@@ -193,64 +484,182 @@ export default function FieldsScreen() {
         <Card style={styles.errorBox}>
           <Text style={styles.errorTitle}>Нет связи с локальным API</Text>
           <Text style={styles.errorDescription}>{error}</Text>
-          <Pressable onPress={load} style={styles.retryButton}>
+          <Pressable onPress={onRefresh} style={styles.retryButton}>
             <Text style={styles.retryButtonText}>Повторить</Text>
           </Pressable>
         </Card>
       ) : fields.length === 0 ? (
         <EmptyState
-          title="Участков нет"
-          text="Создайте первый участок: название, культура, площадь и контур будут сохранены в SQLite."
+          title="Нет участков в этом профиле"
+          text="Добавьте первое поле вручную или распознайте контур со спутника Sentinel-2."
         />
       ) : (
         <Card style={styles.fieldsGroup}>
-          {fields.map((field, index) => (
-            <View key={field.id}>
-              <Pressable
-                onPress={() => router.push({ pathname: '/field/[id]', params: { id: field.id } })}
-                onLongPress={() => confirmDelete(field)}
-                delayLongPress={400}
-                style={({ pressed }) => [styles.fieldRow, pressed && styles.rowPressed]}
-              >
-                <View style={[styles.fieldAccent, { backgroundColor: getCropAccent(field.cropType).accent }]} />
-
-                <View style={styles.fieldCode}>
-                  <Text style={[styles.fieldCodeText, { color: getCropAccent(field.cropType).text }]}>
-                    {getCropCode(field.cropType)}
-                  </Text>
-                </View>
-
-                <View style={styles.fieldMain}>
-                  <View style={styles.fieldTitleRow}>
-                    <Text style={styles.fieldName} numberOfLines={1}>{field.name}</Text>
-                    {field.isDemo && <Badge label="стартовое" variant="muted" />}
+          {fields.map((field, index) => {
+            const cropAccent = getCropAccent(field.cropType);
+            const cropCode = getCropCode(field.cropType);
+            return (
+              <View key={field.id}>
+                <Pressable
+                  onPress={() => onOpenField(field.id)}
+                  onLongPress={() => onDeleteField(field)}
+                  delayLongPress={350}
+                  style={({ pressed }) => [styles.fieldRow, pressed && styles.rowPressed]}
+                >
+                  <View style={[styles.fieldAccent, { backgroundColor: cropAccent.accent }]} />
+                  <View style={[styles.fieldCode, { backgroundColor: cropAccent.bg }]}>
+                    <Text style={[styles.fieldCodeText, { color: cropAccent.text }]}>{cropCode}</Text>
                   </View>
-                  <Text style={styles.fieldMeta} numberOfLines={1}>
-                    {field.cropType} • {field.areaHa.toFixed(1)} га
-                  </Text>
-                  <Text style={styles.fieldMetaSmall} numberOfLines={1}>
-                    Осмотров: {field.inspectionCount}
-                  </Text>
-                </View>
-
-                <Text style={styles.chevron}>›</Text>
-              </Pressable>
-              {index < fields.length - 1 && <View style={styles.rowDivider} />}
-            </View>
-          ))}
+                  <View style={styles.fieldMain}>
+                    <View style={styles.fieldTitleRow}>
+                      <Text style={styles.fieldName} numberOfLines={1}>
+                        {field.name}
+                      </Text>
+                      {field.isDemo && <Badge label="стартовое" variant="neutral" />}
+                    </View>
+                    <Text style={styles.fieldMeta} numberOfLines={1}>
+                      {field.cropType || 'Культура не задана'} • {field.areaHa.toFixed(1)} га
+                    </Text>
+                    <Text style={styles.fieldMetaSmall} numberOfLines={1}>
+                      Осмотров: {field.inspectionCount}
+                    </Text>
+                  </View>
+                  <Text style={styles.chevron}>›</Text>
+                </Pressable>
+                {index < fields.length - 1 && <View style={styles.rowDivider} />}
+              </View>
+            );
+          })}
         </Card>
       )}
-    </Screen>
+    </ScrollView>
   );
 }
 
+/* =========================================================================
+   3. PROFILE VIEW (Right Tab — User Info & Actions)
+   ========================================================================= */
+interface ProfileViewProps {
+  user: ReturnType<typeof useAuth>['user'];
+  isLoading: boolean;
+  onLogout: () => Promise<void>;
+  onNewProfile: () => void;
+}
+
+function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewProps) {
+  if (isLoading || !user) {
+    return (
+      <View style={styles.centerBox}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  const stats = user.stats;
+
+  return (
+    <ScrollView
+      contentContainerStyle={styles.scrollContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <View style={styles.headerTitleBlock}>
+        <Text style={styles.screenTitle}>Профиль</Text>
+        <Text style={styles.screenSubtitle}>Учётная запись агронома</Text>
+      </View>
+
+      {/* Avatar block */}
+      <View style={styles.avatarBlock}>
+        <Avatar name={user.name} size={80} />
+        <Text style={styles.userName}>{user.name}</Text>
+        {user.organization ? <Text style={styles.userOrg}>{user.organization}</Text> : null}
+        {user.region ? <Text style={styles.userRegion}>{user.region}</Text> : null}
+      </View>
+
+      {/* Stats row */}
+      {stats ? (
+        <Card style={styles.statsCard}>
+          <StatCell value={stats.fieldCount} label="участков" />
+          <StatCell
+            value={stats.totalAreaHa % 1 === 0 ? stats.totalAreaHa : Number(stats.totalAreaHa.toFixed(1))}
+            label="га"
+          />
+          <StatCell value={stats.inspectionCount} label="осмотров" />
+          <StatCell value={stats.profileCount} label="профилей" />
+        </Card>
+      ) : null}
+
+      {/* Farm Profile Creation Shortcut */}
+      <Pressable
+        onPress={onNewProfile}
+        style={({ pressed }) => [styles.profileAddButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.profileAddButtonText}>+ Создать новый профиль хозяйства</Text>
+      </Pressable>
+
+      {/* Account info */}
+      <Text style={styles.sectionTitle}>ДАННЫЕ АККАУНТА</Text>
+      <Card style={styles.infoCard}>
+        <InfoRow label="Email" value={user.email} />
+        <View style={styles.rowDivider} />
+        <InfoRow label="Организация" value={user.organization || '—'} />
+        <View style={styles.rowDivider} />
+        <InfoRow label="Регион" value={user.region || '—'} />
+        <View style={styles.rowDivider} />
+        <InfoRow
+          label="Дата регистрации"
+          value={new Date(user.createdAt).toLocaleDateString('ru-RU', {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+          })}
+        />
+      </Card>
+
+      {/* Logout */}
+      <Pressable
+        onPress={() => void onLogout()}
+        style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.logoutText}>Выйти из аккаунта</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+/* =========================================================================
+   Helper Components
+   ========================================================================= */
 function SummaryCell({ value, label }: { value: string | number; label: string }) {
   return (
     <View style={styles.summaryCell}>
-      <Text style={styles.summaryValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
-        {value}
+      <Text style={styles.summaryValue} numberOfLines={1}>
+        {String(value)}
       </Text>
-      <Text style={styles.summaryLabel} numberOfLines={1}>{label}</Text>
+      <Text style={styles.summaryLabel} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function StatCell({ value, label }: { value: string | number; label: string }) {
+  return (
+    <View style={styles.statCell}>
+      <Text style={styles.statValue} numberOfLines={1} adjustsFontSizeToFit>
+        {String(value)}
+      </Text>
+      <Text style={styles.statLabel} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.infoRow}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue}>{value}</Text>
     </View>
   );
 }
@@ -274,76 +683,47 @@ function getCropCode(cropType: string) {
   return words.slice(0, 2).map((word) => word[0]).join('');
 }
 
+/* =========================================================================
+   Styles
+   ========================================================================= */
 const styles = StyleSheet.create({
-  screen: {
-    paddingHorizontal: 16,
-    paddingTop: 4,
-    paddingBottom: 28,
-    gap: 12,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  headerMain: {
+  safeContainer: {
     flex: 1,
-    gap: 3,
+    backgroundColor: colors.background,
   },
-  screenTitle: {
-    fontFamily: fontFamilies.bold,
-    fontSize: 20,
-    color: colors.text,
+  tabContentArea: {
+    flex: 1,
   },
-  screenSubtitle: {
-    fontFamily: fontFamilies.regular,
-    fontSize: 12.5,
-    lineHeight: 17,
-    color: colors.textSecondary,
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 24,
+    gap: 12,
   },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  statusDotOnline: {
-    backgroundColor: colors.success,
-  },
-  statusDotOffline: {
-    backgroundColor: colors.danger,
-  },
-  avatarButton: {
-    borderRadius: 18,
-    overflow: 'hidden',
-  },
-  avatarPlaceholder: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.surfaceSecondary,
+
+  /* Top Profiles Section (At the very top) */
+  topProfilesSection: {
+    marginHorizontal: -16,
+    paddingHorizontal: 16,
+    paddingBottom: 4,
   },
   profileSegmentRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     gap: 8,
-    paddingRight: 4,
+    paddingVertical: 2,
+    paddingRight: 16,
   },
   profileSegmentTab: {
-    minHeight: 36,
-    maxWidth: 220,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
     paddingHorizontal: 14,
-    backgroundColor: '#E5E5EA',
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   profileSegmentTabActive: {
     backgroundColor: colors.primary,
+    borderColor: colors.primary,
   },
   profileSegmentText: {
     fontFamily: fontFamilies.medium,
@@ -351,26 +731,80 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
   profileSegmentTextActive: {
-    fontFamily: fontFamilies.semiBold,
     color: '#FFFFFF',
+    fontFamily: fontFamilies.bold,
   },
   addChip: {
-    minHeight: 36,
     paddingHorizontal: 12,
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
     borderColor: colors.primary,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: colors.primarySoft,
   },
   addChipText: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 12,
-    color: colors.primary,
+    fontSize: 12.5,
+    color: colors.primaryDark,
   },
+
+  /* Headers */
+  headerTitleBlock: {
+    paddingTop: 4,
+    gap: 2,
+  },
+  fieldsHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 2,
+  },
+  fieldsHeaderTitleWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  screenTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 24,
+    color: colors.text,
+  },
+  screenSubtitle: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12.5,
+    color: colors.textSecondary,
+  },
+  connectionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  statusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+  },
+  statusDotOnline: {
+    backgroundColor: colors.success,
+  },
+  statusDotOffline: {
+    backgroundColor: colors.danger,
+  },
+  connectionText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+
+  /* Summary Card */
   summaryCard: {
     flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 12,
   },
   summaryCell: {
@@ -380,24 +814,27 @@ const styles = StyleSheet.create({
   },
   summaryValue: {
     fontFamily: fontFamilies.bold,
-    fontSize: 17,
+    fontSize: 19,
     color: colors.text,
   },
   summaryLabel: {
     fontFamily: fontFamilies.medium,
-    fontSize: 11,
+    fontSize: 11.5,
     color: colors.textSecondary,
   },
   summaryDivider: {
     width: StyleSheet.hairlineWidth,
+    height: 28,
     backgroundColor: colors.border,
   },
+
+  /* Actions Row */
   actionsRow: {
     flexDirection: 'row',
     gap: 10,
   },
   primaryButton: {
-    flex: 1,
+    flex: 2,
     minHeight: 46,
     borderRadius: 10,
     backgroundColor: colors.primary,
@@ -410,44 +847,45 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   secondaryButton: {
+    flex: 1,
     minHeight: 46,
-    paddingHorizontal: 14,
     borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
     backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
   secondaryButtonText: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 14,
-    color: colors.text,
+    fontSize: 13.5,
+    color: colors.primary,
   },
   buttonPressed: {
-    opacity: 0.72,
+    opacity: 0.76,
   },
+
+  /* Section Title */
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
-    paddingHorizontal: 4,
+    paddingHorizontal: 2,
     marginTop: 2,
   },
   sectionTitle: {
-    flexShrink: 0,
-    fontFamily: fontFamilies.semiBold,
+    fontFamily: fontFamilies.bold,
     fontSize: 12,
     color: colors.textSecondary,
+    letterSpacing: 0.4,
   },
   sectionHint: {
-    flexShrink: 1,
     fontFamily: fontFamilies.regular,
     fontSize: 11,
     color: colors.muted,
-    textAlign: 'right',
   },
+
+  /* Fields Group */
   fieldsGroup: {
     padding: 0,
   },
@@ -458,14 +896,14 @@ const styles = StyleSheet.create({
     paddingLeft: 0,
     paddingRight: 12,
     paddingVertical: 12,
-    minHeight: 72,
+    minHeight: 70,
   },
   rowPressed: {
     backgroundColor: colors.surfaceSecondary,
   },
   fieldAccent: {
     alignSelf: 'stretch',
-    width: 3,
+    width: 3.5,
     borderRadius: 2,
   },
   fieldCode: {
@@ -497,7 +935,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     fontFamily: fontFamilies.semiBold,
-    fontSize: 15,
+    fontSize: 14.5,
     color: colors.text,
   },
   fieldMeta: {
@@ -513,14 +951,226 @@ const styles = StyleSheet.create({
   chevron: {
     flexShrink: 0,
     fontFamily: fontFamilies.regular,
-    fontSize: 20,
+    fontSize: 18,
     color: colors.muted,
   },
   rowDivider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.border,
-    marginLeft: 69,
+    marginLeft: 60,
   },
+
+  /* AI Hero Card */
+  aiHeroCard: {
+    padding: 16,
+    backgroundColor: '#064E3B',
+    borderRadius: 14,
+    gap: 10,
+  },
+  aiHeroBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  inDevBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(245, 158, 11, 0.25)',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  inDevDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#F59E0B',
+  },
+  inDevBadgeText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 10.5,
+    color: '#FDE68A',
+    letterSpacing: 0.4,
+  },
+  aiVersionText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11,
+    color: '#A7F3D0',
+  },
+  aiHeroTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 17,
+    color: '#FFFFFF',
+  },
+  aiHeroDescription: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    lineHeight: 18,
+    color: '#D1FAE5',
+  },
+  aiHeroButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  aiHeroButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12.5,
+    color: '#064E3B',
+  },
+
+  /* AI Module Cards */
+  moduleCard: {
+    padding: 14,
+    gap: 8,
+  },
+  moduleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  moduleIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 9,
+    backgroundColor: colors.surfaceSecondary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  moduleIcon: {
+    fontSize: 18,
+  },
+  moduleTitleBox: {
+    flex: 1,
+  },
+  moduleTitle: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 14,
+    color: colors.text,
+  },
+  moduleTag: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11,
+    color: colors.primaryDark,
+  },
+  moduleText: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textSecondary,
+  },
+  moduleFooter: {
+    paddingTop: 4,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  moduleStatus: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: '#B45309',
+  },
+
+  /* Profile Tab Styles */
+  avatarBlock: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    gap: 4,
+  },
+  userName: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 19,
+    color: colors.text,
+    marginTop: 6,
+  },
+  userOrg: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  userRegion: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: colors.muted,
+  },
+  statsCard: {
+    flexDirection: 'row',
+    paddingVertical: 12,
+    justifyContent: 'space-around',
+  },
+  statCell: {
+    alignItems: 'center',
+    gap: 2,
+    flex: 1,
+  },
+  statValue: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: colors.primaryDark,
+  },
+  statLabel: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  profileAddButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  profileAddButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: colors.primaryDark,
+  },
+  infoCard: {
+    paddingVertical: 6,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  infoLabel: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  infoValue: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: colors.text,
+    maxWidth: '60%',
+    textAlign: 'right',
+  },
+  logoutButton: {
+    minHeight: 46,
+    borderRadius: 10,
+    backgroundColor: '#FEE2E2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 6,
+  },
+  logoutText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13.5,
+    color: '#DC2626',
+  },
+
+  /* Error & Loader */
   centerBox: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -538,18 +1188,18 @@ const styles = StyleSheet.create({
   },
   errorTitle: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 15,
+    fontSize: 14.5,
     color: colors.danger,
   },
   errorDescription: {
     fontFamily: fontFamilies.regular,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 12.5,
+    lineHeight: 17,
     color: colors.textSecondary,
   },
   retryButton: {
-    minHeight: 44,
-    borderRadius: 10,
+    minHeight: 42,
+    borderRadius: 8,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
@@ -557,8 +1207,46 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 14,
+    fontSize: 13.5,
     color: '#FFFFFF',
+  },
+
+  /* Bottom Navigation Bar */
+  bottomBar: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingTop: 8,
+    paddingHorizontal: 12,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 5,
+    borderRadius: 10,
+    gap: 3,
+  },
+  tabItemActive: {
+    backgroundColor: colors.primarySoft,
+  },
+  tabIcon: {
+    fontSize: 19,
+  },
+  tabLabel: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  tabLabelActive: {
+    fontFamily: fontFamilies.bold,
+    color: colors.primaryDark,
   },
   pressed: {
     opacity: 0.72,

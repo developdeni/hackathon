@@ -59,8 +59,7 @@ export default function RootLayout() {
         <Stack.Screen
           name="index"
           options={{
-            title: 'Tanap AI',
-            headerBackVisible: false,
+            headerShown: false,
             gestureEnabled: false,
           }}
         />
