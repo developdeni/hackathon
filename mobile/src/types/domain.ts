@@ -44,7 +44,7 @@ export type Inspection = {
   photoUrl: string | null;
   latitude: number | null;
   longitude: number | null;
-  status: 'saved';
+  status: 'saved' | 'pending';
 };
 
 export type ServerHealth = {

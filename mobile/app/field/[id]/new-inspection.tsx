@@ -66,7 +66,7 @@ export default function NewInspectionScreen() {
     }
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes: ['images'],
-      quality: 0.85,
+      quality: 0.82,
       base64: true,
     });
     if (!result.canceled && result.assets[0]) {
@@ -83,7 +83,7 @@ export default function NewInspectionScreen() {
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      quality: 0.85,
+      quality: 0.82,
       base64: true,
     });
     if (!result.canceled && result.assets[0]) {
@@ -91,7 +91,6 @@ export default function NewInspectionScreen() {
       setPhotoBase64(result.assets[0].base64 ?? null);
     }
   }
-
 
   async function addLocation() {
     setLocating(true);
@@ -118,7 +117,7 @@ export default function NewInspectionScreen() {
     }
     setSaving(true);
     try {
-      const inspection = await createInspection({
+      const { inspection, isOffline } = await createInspection({
         fieldId,
         note: note.trim(),
         photoUri,
@@ -126,7 +125,21 @@ export default function NewInspectionScreen() {
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
       });
-      router.replace({ pathname: '/inspection/[id]', params: { id: inspection.id } });
+
+      if (isOffline) {
+        Alert.alert(
+          'Сохранено в памяти устройства',
+          'Связь с сервером отсутствует или нестабильна. Акт осмотра сохранён локально и будет передан в систему при появлении интернета.',
+          [
+            {
+              text: 'Перейти к участку',
+              onPress: () => router.replace({ pathname: '/field/[id]', params: { id: fieldId } }),
+            },
+          ]
+        );
+      } else {
+        router.replace({ pathname: '/inspection/[id]', params: { id: inspection.id } });
+      }
     } catch (error) {
       Alert.alert('Ошибка сохранения', error instanceof Error ? error.message : 'Повторите попытку.');
       setSaving(false);

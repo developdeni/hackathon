@@ -16,6 +16,16 @@ import {
   ZonesData,
 } from '../types/domain';
 import { loadToken } from './auth';
+import {
+  enqueuePendingInspection,
+  flushPendingInspections,
+  getLocalCache,
+  getPendingInspectionById,
+  getPendingInspections,
+  PendingInspection,
+  pendingToDomainInspection,
+  saveLocalCache,
+} from './offline';
 
 export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.8.100:8000';
 
@@ -28,11 +38,19 @@ type CreateInspectionInput = {
   longitude: number | null;
 };
 
-async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 20_000): Promise<T> {
+/**
+ * Robust fetch with JWT injection, abort timeouts, and 1 auto-retry for GET requests
+ */
+async function apiFetch<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = 20_000,
+  retries = init?.method && init.method !== 'GET' ? 0 : 1
+): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    // Attach JWT token if available
     const token = await loadToken();
     const headers: Record<string, string> = {
       ...(init?.headers as Record<string, string> | undefined),
@@ -46,6 +64,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 20_000)
       headers,
       signal: controller.signal,
     });
+
     if (!response.ok) {
       let message = `Ошибка сервера: ${response.status}`;
       try {
@@ -62,15 +81,21 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 20_000)
             .join('; ');
         }
       } catch {
-        // The server did not return JSON.
+        // Response was not JSON
       }
       throw new Error(message);
     }
+
     if (response.status === 204) {
       return undefined as T;
     }
-    return await response.json() as T;
+
+    return (await response.json()) as T;
   } catch (error) {
+    if (retries > 0) {
+      await new Promise((res) => setTimeout(res, 800));
+      return apiFetch<T>(path, init, timeoutMs, retries - 1);
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error(`Сервер не ответил за ${Math.round(timeoutMs / 1000)} секунд`);
     }
@@ -109,31 +134,35 @@ export function getMe() {
 // ---------------------------------------------------------------------------
 
 export function getServerHealth() {
-  return apiFetch<ServerHealth>('/health');
+  return apiFetch<ServerHealth>('/health', undefined, 4_000, 0);
 }
 
 // ---------------------------------------------------------------------------
-// Fields & Profiles
+// Fields & Profiles (Offline Cache-First)
 // ---------------------------------------------------------------------------
 
-export function listFields() {
-  return apiFetch<Field[]>('/api/fields');
-}
+const CACHE_KEYS = {
+  PROFILES: 'profiles',
+  FIELDS_PROFILE: (profileId: string) => `fields_${profileId}`,
+  FIELD: (id: string) => `field_${id}`,
+  INSPECTIONS: (fieldId: string) => `inspections_${fieldId}`,
+  INSPECTION: (id: string) => `inspection_${id}`,
+  SATELLITE: (fieldId: string) => `sat_${fieldId}`,
+  ZONES: (fieldId: string) => `zones_${fieldId}`,
+  WEATHER: (fieldId: string) => `weather_${fieldId}`,
+  CLASSIFICATION: (fieldId: string) => `class_${fieldId}`,
+};
 
-export function listFieldsForProfile(profileId: string) {
-  return apiFetch<Field[]>(`/api/fields?profile_id=${encodeURIComponent(profileId)}`);
-}
-
-export function getField(id: string) {
-  return apiFetch<Field>(`/api/fields/${encodeURIComponent(id)}`);
-}
-
-export function deleteField(id: string) {
-  return apiFetch<void>(`/api/fields/${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-
-export function listProfiles() {
-  return apiFetch<FarmProfile[]>('/api/profiles');
+export async function listProfiles(): Promise<FarmProfile[]> {
+  try {
+    const data = await apiFetch<FarmProfile[]>('/api/profiles');
+    void saveLocalCache(CACHE_KEYS.PROFILES, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<FarmProfile[]>(CACHE_KEYS.PROFILES);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
 export function createProfile(input: CreateProfileInput) {
@@ -142,6 +171,40 @@ export function createProfile(input: CreateProfileInput) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
+}
+
+export function listFields() {
+  return apiFetch<Field[]>('/api/fields');
+}
+
+export async function listFieldsForProfile(profileId: string): Promise<Field[]> {
+  const cacheKey = CACHE_KEYS.FIELDS_PROFILE(profileId);
+  try {
+    const data = await apiFetch<Field[]>(`/api/fields?profile_id=${encodeURIComponent(profileId)}`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<Field[]>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+export async function getField(id: string): Promise<Field> {
+  const cacheKey = CACHE_KEYS.FIELD(id);
+  try {
+    const data = await apiFetch<Field>(`/api/fields/${encodeURIComponent(id)}`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<Field>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+export function deleteField(id: string) {
+  return apiFetch<void>(`/api/fields/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function createField(input: CreateFieldInput) {
@@ -171,24 +234,65 @@ export function updateField(fieldId: string, input: Omit<CreateFieldInput, 'prof
 }
 
 // ---------------------------------------------------------------------------
-// Inspections
+// Inspections (Offline Cache + Outbox Queue)
 // ---------------------------------------------------------------------------
 
-export function listInspections(fieldId: string) {
-  return apiFetch<Inspection[]>(`/api/fields/${encodeURIComponent(fieldId)}/inspections`);
+export async function listInspections(fieldId: string): Promise<Inspection[]> {
+  const cacheKey = CACHE_KEYS.INSPECTIONS(fieldId);
+  let savedItems: Inspection[] = [];
+
+  try {
+    savedItems = await apiFetch<Inspection[]>(`/api/fields/${encodeURIComponent(fieldId)}/inspections`);
+    void saveLocalCache(cacheKey, savedItems);
+  } catch {
+    savedItems = (await getLocalCache<Inspection[]>(cacheKey)) ?? [];
+  }
+
+  // Merge pending outbox inspections for this field so user sees them immediately
+  const pending = await getPendingInspections(fieldId);
+  const pendingDomain = pending.map(pendingToDomainInspection);
+
+  return [...pendingDomain, ...savedItems];
 }
 
-export function getInspection(id: string) {
-  return apiFetch<Inspection>(`/api/inspections/${encodeURIComponent(id)}`);
+export async function getInspection(id: string): Promise<Inspection> {
+  // Check if it's an offline pending inspection
+  if (id.startsWith('local_')) {
+    const pending = await getPendingInspectionById(id);
+    if (pending) {
+      return pendingToDomainInspection(pending);
+    }
+  }
+
+  const cacheKey = CACHE_KEYS.INSPECTION(id);
+  try {
+    const data = await apiFetch<Inspection>(`/api/inspections/${encodeURIComponent(id)}`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<Inspection>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
-export async function createInspection(input: CreateInspectionInput) {
+/**
+ * Direct upload of inspection payload to backend
+ */
+async function uploadInspectionPayload(input: {
+  fieldId: string;
+  note: string;
+  latitude: number | null;
+  longitude: number | null;
+  photoBase64?: string | null;
+  photoUri?: string | null;
+}): Promise<Inspection> {
   const extension = input.photoUri?.split('.').pop()?.toLowerCase() ?? 'jpg';
   const fileName = `inspection.${extension}`;
 
-  // If base64 is already provided or if no photo attached, send clean JSON
-  if (input.photoBase64 || !input.photoUri) {
-    return apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
+  return apiFetch<Inspection>(
+    `/api/fields/${encodeURIComponent(input.fieldId)}/inspections`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -198,73 +302,116 @@ export async function createInspection(input: CreateInspectionInput) {
         photo_base64: input.photoBase64 ?? null,
         photo_name: fileName,
       }),
-    });
-  }
+    },
+    45_000 // Extended timeout for mobile uploads
+  );
+}
 
-  // If photoUri is present without base64, convert to Blob or read as data URL
+/**
+ * Creates an inspection online or automatically saves to outbox queue if network fails
+ */
+export async function createInspection(
+  input: CreateInspectionInput
+): Promise<{ inspection: Inspection; isOffline: boolean }> {
   try {
-    const res = await fetch(input.photoUri);
-    const blob = await res.blob();
-    const form = new FormData();
-    form.append('note', input.note);
-    if (input.latitude !== null) form.append('latitude', String(input.latitude));
-    if (input.longitude !== null) form.append('longitude', String(input.longitude));
-    form.append('photo', blob, fileName);
-
-    return await apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
-      method: 'POST',
-      body: form,
+    const saved = await uploadInspectionPayload(input);
+    return { inspection: saved, isOffline: false };
+  } catch (error) {
+    // Network / timeout error: enqueue into offline outbox so nothing is lost!
+    const pending = await enqueuePendingInspection({
+      fieldId: input.fieldId,
+      note: input.note,
+      photoUri: input.photoUri,
+      photoBase64: input.photoBase64 ?? null,
+      latitude: input.latitude,
+      longitude: input.longitude,
     });
-  } catch {
-    const res = await fetch(input.photoUri);
-    const blob = await res.blob();
-    const base64Data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-
-    return apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        note: input.note,
-        latitude: input.latitude,
-        longitude: input.longitude,
-        photo_base64: base64Data,
-        photo_name: fileName,
-      }),
-    });
+    return { inspection: pendingToDomainInspection(pending), isOffline: true };
   }
 }
 
+/**
+ * Synchronizes any pending inspections in the offline queue to the server
+ */
+export async function syncOfflineQueue(): Promise<{ synced: number; failed: number }> {
+  return flushPendingInspections(async (pending: PendingInspection) => {
+    await uploadInspectionPayload({
+      fieldId: pending.fieldId,
+      note: pending.note,
+      latitude: pending.latitude,
+      longitude: pending.longitude,
+      photoBase64: pending.photoBase64,
+      photoUri: pending.photoUri,
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
-// Analytics
+// Analytics (Offline Cache-First)
 // ---------------------------------------------------------------------------
 
-export function getFieldSatellite(fieldId: string) {
-  return apiFetch<SatelliteData>(`/api/fields/${encodeURIComponent(fieldId)}/satellite`);
+export async function getFieldSatellite(fieldId: string): Promise<SatelliteData> {
+  const cacheKey = CACHE_KEYS.SATELLITE(fieldId);
+  try {
+    const data = await apiFetch<SatelliteData>(`/api/fields/${encodeURIComponent(fieldId)}/satellite`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<SatelliteData>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
-export function getFieldZones(fieldId: string) {
-  return apiFetch<ZonesData>(`/api/fields/${encodeURIComponent(fieldId)}/zones`);
+export async function getFieldZones(fieldId: string): Promise<ZonesData> {
+  const cacheKey = CACHE_KEYS.ZONES(fieldId);
+  try {
+    const data = await apiFetch<ZonesData>(`/api/fields/${encodeURIComponent(fieldId)}/zones`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<ZonesData>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
-export function getFieldWeather(fieldId: string) {
-  return apiFetch<AgroWeather>(`/api/fields/${encodeURIComponent(fieldId)}/weather`);
+export async function getFieldWeather(fieldId: string): Promise<AgroWeather> {
+  const cacheKey = CACHE_KEYS.WEATHER(fieldId);
+  try {
+    const data = await apiFetch<AgroWeather>(`/api/fields/${encodeURIComponent(fieldId)}/weather`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<AgroWeather>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
-export function getFieldClassification(fieldId: string) {
-  return apiFetch<LandUseClassification>(`/api/fields/${encodeURIComponent(fieldId)}/classification`);
+export async function getFieldClassification(fieldId: string): Promise<LandUseClassification> {
+  const cacheKey = CACHE_KEYS.CLASSIFICATION(fieldId);
+  try {
+    const data = await apiFetch<LandUseClassification>(`/api/fields/${encodeURIComponent(fieldId)}/classification`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<LandUseClassification>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
 export function detectFieldBoundary(input: { latitude: number; longitude: number; radiusMeters: number }) {
-  return apiFetch<AutoBoundaryResult>('/api/fields/auto-boundary', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  }, 35_000);
+  return apiFetch<AutoBoundaryResult>(
+    '/api/fields/auto-boundary',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+    35_000
+  );
 }
 
 export async function buildAuthorizedDownloadUrl(path: string) {

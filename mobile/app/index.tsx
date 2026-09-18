@@ -22,6 +22,7 @@ import {
   getServerHealth,
   listFieldsForProfile,
   listProfiles,
+  syncOfflineQueue,
 } from '../src/services/api';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
@@ -59,24 +60,43 @@ export default function MainScreen() {
   }, [params.tab]);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    if (profiles.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const [health, profileItems] = await Promise.all([getServerHealth(), listProfiles()]);
-      const profileWithFields = profileItems.find((profile) => profile.fieldCount > 0);
-      const nextProfileId = params.profileId ?? selectedProfileId ?? profileWithFields?.id ?? profileItems[0]?.id ?? null;
-      const fieldItems = nextProfileId ? await listFieldsForProfile(nextProfileId) : [];
-      setConnected(health.status === 'ok' && health.database === 'connected');
-      setProfiles(profileItems);
-      setSelectedProfileId(nextProfileId);
-      setFields(fieldItems);
+      // In the background, flush any pending inspections from offline outbox
+      void syncOfflineQueue().catch(() => {});
+
+      const [healthRes, profileItems] = await Promise.allSettled([
+        getServerHealth(),
+        listProfiles(),
+      ]);
+
+      const isOnline = healthRes.status === 'fulfilled' && healthRes.value.status === 'ok';
+      setConnected(isOnline);
+
+      if (profileItems.status === 'fulfilled') {
+        const pList = profileItems.value;
+        const profileWithFields = pList.find((profile) => profile.fieldCount > 0);
+        const nextProfileId =
+          params.profileId ?? selectedProfileId ?? profileWithFields?.id ?? pList[0]?.id ?? null;
+        const fieldItems = nextProfileId ? await listFieldsForProfile(nextProfileId) : [];
+        setProfiles(pList);
+        setSelectedProfileId(nextProfileId);
+        setFields(fieldItems);
+      } else {
+        throw profileItems.reason;
+      }
     } catch (nextError) {
       setConnected(false);
-      setError(nextError instanceof Error ? nextError.message : 'Не удалось подключиться к серверу');
+      if (profiles.length === 0) {
+        setError(nextError instanceof Error ? nextError.message : 'Не удалось подключиться к серверу');
+      }
     } finally {
       setLoading(false);
     }
-  }, [params.profileId, selectedProfileId]);
+  }, [params.profileId, selectedProfileId, profiles.length]);
 
   useFocusEffect(
     useCallback(() => {

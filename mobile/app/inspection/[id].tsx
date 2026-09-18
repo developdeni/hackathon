@@ -65,7 +65,11 @@ export default function InspectionScreen() {
           <Text style={styles.screenTitle}>{field?.name ?? 'Поле'}</Text>
           <Text style={styles.headerMeta}>Акт осмотра #{inspection.id.slice(-8)}</Text>
         </View>
-        <Badge label="Сохранено" variant="success" />
+        {inspection.status === 'pending' ? (
+          <Badge label="Офлайн-очередь" variant="warning" />
+        ) : (
+          <Badge label="Сохранено" variant="success" />
+        )}
       </View>
 
       {/* Photo Frame */}

@@ -27,6 +27,7 @@ import {
   getFieldWeather,
   getFieldZones,
   listInspections,
+  syncOfflineQueue,
 } from '../../src/services/api';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
@@ -278,9 +279,11 @@ export default function FieldScreen() {
 
   const load = useCallback(async () => {
     if (!id) return;
-    setLoading(true);
+    if (!field) setLoading(true);
     setError(null);
     try {
+      void syncOfflineQueue().catch(() => {});
+
       const [fieldRes, inspectionsRes, satRes, zonesRes, weatherRes, classificationRes] = await Promise.allSettled([
         getField(id),
         listInspections(id),
@@ -292,7 +295,7 @@ export default function FieldScreen() {
 
       if (fieldRes.status === 'fulfilled') {
         setField(fieldRes.value);
-      } else {
+      } else if (!field) {
         throw new Error(fieldRes.reason instanceof Error ? fieldRes.reason.message : 'Не удалось загрузить поле');
       }
       if (inspectionsRes.status === 'fulfilled') setInspections(inspectionsRes.value);
@@ -304,11 +307,13 @@ export default function FieldScreen() {
       if (weatherRes.status === 'fulfilled') setWeather(weatherRes.value);
       if (classificationRes.status === 'fulfilled') setClassification(classificationRes.value);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Ошибка загрузки');
+      if (!field) {
+        setError(nextError instanceof Error ? nextError.message : 'Ошибка загрузки');
+      }
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, field]);
 
   useFocusEffect(useCallback(() => { void load(); }, [load]));
 
@@ -801,7 +806,11 @@ export default function FieldScreen() {
                 <View style={styles.inspMain}>
                   <View style={styles.inspTopRow}>
                     <Text style={styles.inspDate}>{formatDate(insp.createdAt)}</Text>
-                    <Badge label="Сохранено" variant="success" />
+                    {insp.status === 'pending' ? (
+                      <Badge label="Офлайн-очередь" variant="warning" />
+                    ) : (
+                      <Badge label="Сохранено" variant="success" />
+                    )}
                   </View>
                   <Text numberOfLines={2} style={styles.inspNote}>
                     {insp.note || 'Без текстового описания'}
