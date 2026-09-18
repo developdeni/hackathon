@@ -41,7 +41,8 @@ export default function RootLayout() {
             fontFamily: fontFamilies.bold,
             fontSize: 17,
           },
-          headerBackTitle: '',
+          headerBackTitle: 'Назад',
+          headerBackButtonDisplayMode: 'minimal',
           contentStyle: { backgroundColor: colors.background },
         }}
       >
@@ -60,21 +61,23 @@ export default function RootLayout() {
           name="index"
           options={{
             headerShown: false,
+            headerBackTitle: 'Назад',
+            title: 'Назад',
             gestureEnabled: false,
           }}
         />
 
         {/* Profile screens */}
-        <Stack.Screen name="profile/me" options={{ title: 'Мой профиль' }} />
-        <Stack.Screen name="profile/new" options={{ title: 'Новый профиль' }} />
+        <Stack.Screen name="profile/me" options={{ title: 'Мой профиль', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="profile/new" options={{ title: 'Новый профиль', headerBackTitle: 'Назад' }} />
 
         {/* Field screens */}
-        <Stack.Screen name="field/new" options={{ title: 'Новый участок' }} />
-        <Stack.Screen name="field/[id]" options={{ title: 'Карточка поля' }} />
-        <Stack.Screen name="field/[id]/new-inspection" options={{ title: 'Новый осмотр' }} />
+        <Stack.Screen name="field/new" options={{ title: 'Новый участок', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="field/[id]" options={{ title: 'Карточка поля', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="field/[id]/new-inspection" options={{ title: 'Новый осмотр', headerBackTitle: 'Назад' }} />
 
         {/* Inspection */}
-        <Stack.Screen name="inspection/[id]" options={{ title: 'Осмотр' }} />
+        <Stack.Screen name="inspection/[id]" options={{ title: 'Осмотр', headerBackTitle: 'Назад' }} />
       </Stack>
     </AuthProvider>
   );
