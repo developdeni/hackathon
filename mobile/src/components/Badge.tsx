@@ -1,10 +1,11 @@
 import React from 'react';
-import { StyleSheet, Text, TextStyle, View, ViewStyle } from 'react-native';
+import { StyleSheet, TextStyle, View, ViewStyle } from 'react-native';
+import { Text } from './AppText';
 
 import { colors } from '../theme/colors';
 import { fontFamilies } from '../theme/typography';
 
-type BadgeVariant = 'demo' | 'success' | 'warning' | 'neutral' | 'primary' | 'muted';
+type BadgeVariant = 'demo' | 'success' | 'warning' | 'danger' | 'neutral' | 'primary' | 'muted';
 
 type Props = {
   label: string;
@@ -25,15 +26,16 @@ export function Badge({ label, variant = 'neutral', style, textStyle }: Props) {
 
 const styles = StyleSheet.create({
   badge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2.5,
-    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
     alignSelf: 'flex-start',
+    flexShrink: 0,
   },
   label: {
     fontFamily: fontFamilies.semiBold,
     fontSize: 10.5,
-    letterSpacing: 0.3,
+    letterSpacing: 0.2,
   },
 });
 
@@ -49,6 +51,10 @@ const variantStyles: Record<BadgeVariant, { container: ViewStyle; text: TextStyl
   warning: {
     container: { backgroundColor: colors.warningSoft },
     text: { color: colors.warning },
+  },
+  danger: {
+    container: { backgroundColor: colors.dangerSoft },
+    text: { color: colors.danger },
   },
   neutral: {
     container: { backgroundColor: '#EFEFF4' },

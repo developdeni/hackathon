@@ -9,45 +9,6 @@ DATA_DIR = BACKEND_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 DATABASE_PATH = DATA_DIR / "tanap.db"
 
-DEMO_FIELDS = [
-    {
-        "id": "demo-field-wheat",
-        "name": "Северное поле",
-        "cropType": "Пшеница",
-        "areaHa": 126.4,
-        "boundary": [
-            {"latitude": 53.303, "longitude": 69.385},
-            {"latitude": 53.307, "longitude": 69.399},
-            {"latitude": 53.299, "longitude": 69.405},
-            {"latitude": 53.294, "longitude": 69.39},
-        ],
-    },
-    {
-        "id": "demo-field-rapeseed",
-        "name": "У озера",
-        "cropType": "Рапс",
-        "areaHa": 84.7,
-        "boundary": [
-            {"latitude": 53.276, "longitude": 69.43},
-            {"latitude": 53.282, "longitude": 69.443},
-            {"latitude": 53.274, "longitude": 69.449},
-            {"latitude": 53.269, "longitude": 69.436},
-        ],
-    },
-    {
-        "id": "demo-field-potato",
-        "name": "Долинное поле",
-        "cropType": "Картофель",
-        "areaHa": 38.2,
-        "boundary": [
-            {"latitude": 53.326, "longitude": 69.344},
-            {"latitude": 53.329, "longitude": 69.353},
-            {"latitude": 53.323, "longitude": 69.358},
-            {"latitude": 53.319, "longitude": 69.348},
-        ],
-    },
-]
-
 
 def connect() -> sqlite3.Connection:
     connection = sqlite3.connect(DATABASE_PATH)
@@ -64,15 +25,38 @@ def initialize_database() -> None:
         connection.executescript(
             """
             PRAGMA journal_mode = WAL;
+
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                organization TEXT NOT NULL DEFAULT '',
+                region TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS profiles (
+                id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT,
+                name TEXT NOT NULL,
+                region TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS fields (
                 id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT,
+                profile_id TEXT NOT NULL DEFAULT 'profile-akmola-agro',
                 name TEXT NOT NULL,
                 crop_type TEXT NOT NULL,
                 area_ha REAL NOT NULL,
+                perimeter_km REAL NOT NULL DEFAULT 0.0,
                 boundary_json TEXT NOT NULL,
                 is_demo INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
             CREATE TABLE IF NOT EXISTS inspections (
                 id TEXT PRIMARY KEY NOT NULL,
                 field_id TEXT NOT NULL,
@@ -86,33 +70,85 @@ def initialize_database() -> None:
             );
             """
         )
-        for field in DEMO_FIELDS:
+
+        # Migrations — add new columns to existing tables if missing
+        field_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(fields)").fetchall()
+        }
+        if "profile_id" not in field_columns:
+            connection.execute(
+                "ALTER TABLE fields ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'profile-akmola-agro'"
+            )
+        if "perimeter_km" not in field_columns:
+            connection.execute(
+                "ALTER TABLE fields ADD COLUMN perimeter_km REAL NOT NULL DEFAULT 0.0"
+            )
+        if "user_id" not in field_columns:
+            connection.execute("ALTER TABLE fields ADD COLUMN user_id TEXT")
+
+        profile_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        if "user_id" not in profile_columns:
+            connection.execute("ALTER TABLE profiles ADD COLUMN user_id TEXT")
+
+        # Убираем старые ОБЩИЕ (не привязанные к пользователю) профили и поля —
+        # именно они раньше показывались всем сразу. Теперь данные строго
+        # индивидуальны, и новые аккаунты создаются ПУСТЫМИ (без демо-данных).
+        connection.execute("DELETE FROM fields WHERE user_id IS NULL")
+        connection.execute("DELETE FROM profiles WHERE user_id IS NULL")
+
+        # Разовая чистка ранее авто-созданных демо-данных (демо-поля и пустые
+        # авто-профили «ТОО Акмола-Агро»/«Личный профиль»), чтобы у пользователей
+        # не оставалось того, что раньше подставлялось автоматически.
+        migration_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if migration_version < 1:
+            connection.execute("DELETE FROM fields WHERE is_demo = 1")
             connection.execute(
                 """
-                INSERT OR IGNORE INTO fields
-                (id, name, crop_type, area_ha, boundary_json, is_demo, created_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?)
-                """,
-                (
-                    field["id"],
-                    field["name"],
-                    field["cropType"],
-                    field["areaHa"],
-                    json.dumps(field["boundary"], ensure_ascii=False),
-                    "2026-09-17T00:00:00.000Z",
-                ),
+                DELETE FROM profiles
+                WHERE name IN ('ТОО «Акмола-Агро»', 'Личный профиль')
+                  AND id NOT IN (SELECT DISTINCT profile_id FROM fields)
+                """
             )
+            connection.execute("PRAGMA user_version = 1")
 
 
-def field_from_row(row: sqlite3.Row) -> dict[str, Any]:
+def profile_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "name": row["name"],
+        "region": row["region"],
+        "createdAt": row["created_at"],
+        "fieldCount": row["field_count"] if "field_count" in row.keys() else 0,
+    }
+
+
+def field_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys()
+    return {
+        "id": row["id"],
+        "profileId": row["profile_id"],
+        "name": row["name"],
         "cropType": row["crop_type"],
         "areaHa": row["area_ha"],
+        "perimeterKm": row["perimeter_km"] if "perimeter_km" in keys else 0.0,
         "boundary": json.loads(row["boundary_json"]),
         "isDemo": bool(row["is_demo"]),
-        "inspectionCount": row["inspection_count"],
+        "inspectionCount": row["inspection_count"] if "inspection_count" in keys else 0,
+    }
+
+
+def user_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "organization": row["organization"],
+        "region": row["region"],
+        "createdAt": row["created_at"],
     }
 
 

@@ -1,22 +1,207 @@
 import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { Text } from '../../src/components/AppText';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Polygon } from 'react-native-maps';
+import MapView, { Marker, Polygon } from 'react-native-maps';
 
 import { Badge } from '../../src/components/Badge';
 import { Card } from '../../src/components/Card';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Screen } from '../../src/components/Screen';
-import { getField, listInspections } from '../../src/services/api';
+import {
+  buildAuthorizedDownloadUrl,
+  deleteField,
+  getField,
+  getFieldClassification,
+  getFieldSatellite,
+  getFieldWeather,
+  getFieldZones,
+  listInspections,
+} from '../../src/services/api';
 import { colors } from '../../src/theme/colors';
-import { fontFamilies, typography } from '../../src/theme/typography';
-import { Field, Inspection } from '../../src/types/domain';
+import { fontFamilies } from '../../src/theme/typography';
+import {
+  AgroWeather,
+  Field,
+  Inspection,
+  LandUseClassification,
+  RiskZone,
+  SatelliteData,
+  ZonesData,
+} from '../../src/types/domain';
+
+type MapMode = 'zones' | 'satellite' | 'boundary';
+
+const NDVI_LEGEND_COLORS = ['#BD0026', '#F03B20', '#FD8D3C', '#FED976', '#78C679', '#238443'];
+
+// ---------------------------------------------------------------------------
+// Small reusable components
+// ---------------------------------------------------------------------------
+
+function SectionLabel({ title, right }: { title: string; right?: string }) {
+  return (
+    <View style={sStyles.wrap}>
+      <Text style={sStyles.title} numberOfLines={1}>{title}</Text>
+      {right ? <Text style={sStyles.right} numberOfLines={1}>{right}</Text> : null}
+    </View>
+  );
+}
+
+const sStyles = StyleSheet.create({
+  wrap: { paddingHorizontal: 2, gap: 1 },
+  title: { fontFamily: fontFamilies.semiBold, fontSize: 11.5, letterSpacing: 0.6, color: colors.textSecondary },
+  right: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted },
+});
+
+function MetricCell({ value, unit, label }: { value: string; unit: string; label: string }) {
+  return (
+    <View style={mStyles.cell}>
+      <View style={mStyles.valueRow}>
+        <Text style={mStyles.value}>{value}</Text>
+        {unit ? <Text style={mStyles.unit}>{unit}</Text> : null}
+      </View>
+      <Text style={mStyles.label}>{label}</Text>
+    </View>
+  );
+}
+
+const mStyles = StyleSheet.create({
+  cell: { flex: 1, alignItems: 'center', paddingVertical: 10 },
+  valueRow: { flexDirection: 'row', alignItems: 'baseline', gap: 2 },
+  value: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.text },
+  unit: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.textSecondary, marginBottom: 1 },
+  label: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted, marginTop: 2 },
+});
+
+function InfoRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  return (
+    <View style={iStyles.row}>
+      <Text style={iStyles.label} numberOfLines={1}>{label}</Text>
+      <Text style={[iStyles.value, valueColor ? { color: valueColor } : null]} numberOfLines={2}>{value}</Text>
+    </View>
+  );
+}
+
+const iStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingVertical: 9 },
+  label: { fontFamily: fontFamilies.regular, fontSize: 13.5, color: colors.textSecondary, flex: 1 },
+  value: { fontFamily: fontFamilies.semiBold, fontSize: 13.5, color: colors.text, flex: 1.2, textAlign: 'right' },
+});
+
+function WeatherCell({ value, label, wide }: { value: string; label: string; wide?: boolean }) {
+  return (
+    <View style={[wStyles.cell, wide && wStyles.wide]}>
+      <Text style={wStyles.value} numberOfLines={1}>{value}</Text>
+      <Text style={wStyles.label}>{label}</Text>
+    </View>
+  );
+}
+
+const wStyles = StyleSheet.create({
+  cell: { width: '50%', paddingVertical: 10, paddingHorizontal: 14, alignItems: 'center' },
+  wide: { width: '100%' },
+  value: { fontFamily: fontFamilies.bold, fontSize: 16, color: colors.text },
+  label: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted, marginTop: 2 },
+});
+
+function SegTab({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[segStyles.tab, active && segStyles.tabActive]}
+    >
+      <Text style={[segStyles.text, active && segStyles.textActive]} numberOfLines={1}>{label}</Text>
+    </Pressable>
+  );
+}
+
+const segStyles = StyleSheet.create({
+  tab: { flex: 1, paddingVertical: 7, alignItems: 'center', borderRadius: 8 },
+  tabActive: { backgroundColor: '#FFFFFF', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.12, shadowRadius: 2, elevation: 2 },
+  text: { fontFamily: fontFamilies.medium, fontSize: 12.5, color: colors.textSecondary },
+  textActive: { fontFamily: fontFamilies.semiBold, color: colors.text },
+});
+
+function ZonePill({ zone, active, onPress }: { zone: RiskZone; active: boolean; onPress: () => void }) {
+  const isCritical = zone.severity === 'critical';
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[zpStyles.pill, active && (isCritical ? zpStyles.pillCritical : zpStyles.pillModerate)]}
+    >
+      <View style={[zpStyles.dot, { backgroundColor: isCritical ? colors.danger : colors.warning }]} />
+      <Text style={[zpStyles.text, active && zpStyles.textActive]} numberOfLines={1}>{zone.title}</Text>
+    </Pressable>
+  );
+}
+
+const zpStyles = StyleSheet.create({
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  pillCritical: { borderColor: colors.danger, backgroundColor: colors.dangerSoft },
+  pillModerate: { borderColor: colors.warning, backgroundColor: colors.warningSoft },
+  dot: { width: 7, height: 7, borderRadius: 3.5 },
+  text: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary, flex: 1 },
+  textActive: { fontFamily: fontFamilies.semiBold, color: colors.text },
+});
+
+function ActionRow({ title, destructive, onPress }: { title: string; destructive?: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [arStyles.row, pressed && arStyles.pressed]}
+    >
+      <Text style={[arStyles.text, destructive && arStyles.textDestructive]}>{title}</Text>
+      <Text style={[arStyles.chevron, destructive && arStyles.chevronDestructive]}>›</Text>
+    </Pressable>
+  );
+}
+
+const arStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 13, gap: 8 },
+  pressed: { backgroundColor: colors.surfaceSecondary },
+  text: { flex: 1, fontFamily: fontFamilies.medium, fontSize: 14.5, color: colors.text },
+  textDestructive: { color: colors.danger },
+  chevron: { fontFamily: fontFamilies.regular, fontSize: 20, color: colors.muted },
+  chevronDestructive: { color: '#F4B4B4' },
+});
+
+// ---------------------------------------------------------------------------
+// Main Screen
+// ---------------------------------------------------------------------------
 
 export default function FieldScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [field, setField] = useState<Field | null>(null);
   const [inspections, setInspections] = useState<Inspection[]>([]);
+  const [satellite, setSatellite] = useState<SatelliteData | null>(null);
+  const [zonesData, setZonesData] = useState<ZonesData | null>(null);
+  const [weather, setWeather] = useState<AgroWeather | null>(null);
+  const [classification, setClassification] = useState<LandUseClassification | null>(null);
+  const [mapMode, setMapMode] = useState<MapMode>('zones');
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+  const [selectedZone, setSelectedZone] = useState<RiskZone | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,11 +210,30 @@ export default function FieldScreen() {
     setLoading(true);
     setError(null);
     try {
-      const [nextField, nextInspections] = await Promise.all([getField(id), listInspections(id)]);
-      setField(nextField);
-      setInspections(nextInspections);
+      const [fieldRes, inspectionsRes, satRes, zonesRes, weatherRes, classificationRes] = await Promise.allSettled([
+        getField(id),
+        listInspections(id),
+        getFieldSatellite(id),
+        getFieldZones(id),
+        getFieldWeather(id),
+        getFieldClassification(id),
+      ]);
+
+      if (fieldRes.status === 'fulfilled') {
+        setField(fieldRes.value);
+      } else {
+        throw new Error(fieldRes.reason instanceof Error ? fieldRes.reason.message : 'Не удалось загрузить поле');
+      }
+      if (inspectionsRes.status === 'fulfilled') setInspections(inspectionsRes.value);
+      if (satRes.status === 'fulfilled') setSatellite(satRes.value);
+      if (zonesRes.status === 'fulfilled') {
+        setZonesData(zonesRes.value);
+        if (zonesRes.value.zones.length > 0) setSelectedZone(zonesRes.value.zones[0]);
+      }
+      if (weatherRes.status === 'fulfilled') setWeather(weatherRes.value);
+      if (classificationRes.status === 'fulfilled') setClassification(classificationRes.value);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить данные поля');
+      setError(nextError instanceof Error ? nextError.message : 'Ошибка загрузки');
     } finally {
       setLoading(false);
     }
@@ -39,192 +243,521 @@ export default function FieldScreen() {
 
   const region = useMemo(() => {
     if (!field) return undefined;
-    const latitudes = field.boundary.map((point) => point.latitude);
-    const longitudes = field.boundary.map((point) => point.longitude);
-    const minLat = Math.min(...latitudes);
-    const maxLat = Math.max(...latitudes);
-    const minLng = Math.min(...longitudes);
-    const maxLng = Math.max(...longitudes);
+    const lats = field.boundary.map((p) => p.latitude);
+    const lngs = field.boundary.map((p) => p.longitude);
+    const minLat = Math.min(...lats); const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs); const maxLng = Math.max(...lngs);
     return {
       latitude: (minLat + maxLat) / 2,
       longitude: (minLng + maxLng) / 2,
-      latitudeDelta: Math.max((maxLat - minLat) * 1.8, 0.02),
-      longitudeDelta: Math.max((maxLng - minLng) * 1.8, 0.02),
+      latitudeDelta: Math.max((maxLat - minLat) * 1.7, 0.014),
+      longitudeDelta: Math.max((maxLng - minLng) * 1.7, 0.014),
     };
   }, [field]);
 
+  // --- Loading / Error states ---
   if (loading) {
     return (
-      <View style={styles.loader}>
+      <View style={styles.center}>
         <ActivityIndicator size="small" color={colors.primary} />
+        <Text style={styles.loadingText}>Загрузка данных поля…</Text>
       </View>
     );
   }
-
-  if (error) {
+  if (error || !field || !region) {
     return (
-      <View style={styles.loader}>
-        <Text style={styles.errorTitle}>Ошибка загрузки</Text>
-        <Text style={styles.errorText}>{error}</Text>
-        <Pressable onPress={load} style={styles.retryButton}>
+      <View style={styles.center}>
+        <Text style={styles.errTitle}>Ошибка загрузки</Text>
+        <Text style={styles.errText}>{error ?? 'Поле не найдено'}</Text>
+        <Pressable onPress={load} style={styles.retryBtn}>
           <Text style={styles.retryText}>Повторить</Text>
         </Pressable>
       </View>
     );
   }
 
-  if (!field || !region) {
-    return (
-      <View style={styles.loader}>
-        <Text style={styles.errorText}>Поле не найдено.</Text>
-      </View>
+  const latestObs = satellite?.observations?.[satellite.observations.length - 1];
+  const avatar = getCropAvatar(field.cropType);
+
+  function confirmDelete() {
+    Alert.alert(
+      'Удалить участок?',
+      `«${field!.name}» и все его осмотры будут удалены из локальной базы.`,
+      [
+        { text: 'Отмена', style: 'cancel' },
+        { text: 'Удалить', style: 'destructive', onPress: () => void removeField() },
+      ],
     );
   }
 
+  async function removeField() {
+    try {
+      await deleteField(field!.id);
+      router.replace({ pathname: '/', params: { profileId: field!.profileId } });
+    } catch (e) {
+      Alert.alert('Не удалось удалить', e instanceof Error ? e.message : 'Повторите попытку.');
+    }
+  }
+
+  async function openExport(format: 'geojson' | 'csv' | 'pdf') {
+    try {
+      const url = await buildAuthorizedDownloadUrl(`/api/fields/${encodeURIComponent(field!.id)}/export/${format}`);
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        Alert.alert('Выгрузка недоступна', 'Устройство не может открыть этот тип файла.');
+        return;
+      }
+      await Linking.openURL(url);
+    } catch (e) {
+      Alert.alert('Не удалось открыть отчёт', e instanceof Error ? e.message : 'Повторите попытку.');
+    }
+  }
+
+  const ndviStatusColor = zonesData?.meanFieldNdvi != null
+    ? (zonesData.meanFieldNdvi > 0.5 ? colors.success : colors.warning)
+    : colors.text;
+
   return (
     <Screen contentStyle={styles.content}>
-      {/* Field Overview Card: Inset Grouped Table */}
+
+      {/* ── 1. OVERVIEW CARD ───────────────────────────────────── */}
       <Card style={styles.overviewCard}>
         <View style={styles.overviewHeader}>
-          <View style={styles.nameRow}>
-            <Text style={styles.fieldName}>{field.name}</Text>
-            {field.isDemo && <Badge label="ДЕМО" variant="demo" />}
+          <View style={[styles.cropAvatar, { backgroundColor: avatar.bg }]}>
+            <Text style={[styles.cropAvatarText, { color: avatar.text }]}>{avatar.short}</Text>
           </View>
-          <Text style={styles.fieldId}>ID: {field.id}</Text>
+          <View style={styles.overviewTitles}>
+            <Text style={styles.fieldName} numberOfLines={2}>{field.name}</Text>
+            <Text style={styles.fieldCrop} numberOfLines={1}>{field.cropType}</Text>
+          </View>
+          {field.isDemo && <Badge label="Демо" variant="muted" style={{ flexShrink: 0 }} />}
         </View>
 
-        <View style={styles.divider} />
+        <View style={styles.hairline} />
 
-        <View style={styles.tableRow}>
-          <Text style={styles.tableLabel}>Культура</Text>
-          <Text style={styles.tableValue}>{field.cropType}</Text>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.tableRow}>
-          <Text style={styles.tableLabel}>Площадь</Text>
-          <Text style={styles.tableValue}>{field.areaHa.toFixed(1)} га</Text>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.tableRow}>
-          <Text style={styles.tableLabel}>Точек контура</Text>
-          <Text style={styles.tableValue}>{field.boundary.length} вершины</Text>
+        <View style={styles.metricsRow}>
+          <MetricCell value={field.areaHa.toFixed(1)} unit="га" label="Площадь" />
+          <View style={styles.vertDiv} />
+          <MetricCell
+            value={field.perimeterKm != null ? field.perimeterKm.toFixed(1) : '—'}
+            unit="км"
+            label="Периметр"
+          />
+          <View style={styles.vertDiv} />
+          <MetricCell value={String(inspections.length)} unit="" label="Осмотров" />
         </View>
       </Card>
 
-      {/* Map Viewport */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>КОНТУР И СПУТНИКОВАЯ КАРТА</Text>
+      {classification && (
+        <>
+          <SectionLabel title="ИСПОЛЬЗОВАНИЕ ЗЕМЛИ" right="NDVI амплитуда" />
+          <Card style={styles.classCard}>
+            <View style={styles.classHeader}>
+              <Badge
+                label={classification.label}
+                variant={classification.status === 'active' ? 'success' : classification.status === 'fallow' ? 'warning' : 'neutral'}
+              />
+              <Text style={styles.classRule} numberOfLines={1}>
+                {classification.amplitude != null ? `Δ ${classification.amplitude.toFixed(2)}` : 'мало снимков'}
+              </Text>
+            </View>
+            <Text style={styles.classDescription}>{classification.description}</Text>
+            <View style={styles.hairline} />
+            <View style={styles.classMetrics}>
+              <MetricCell value={classification.minNdvi != null ? classification.minNdvi.toFixed(2) : '—'} unit="" label="min NDVI" />
+              <View style={styles.vertDiv} />
+              <MetricCell value={classification.maxNdvi != null ? classification.maxNdvi.toFixed(2) : '—'} unit="" label="max NDVI" />
+            </View>
+          </Card>
+        </>
+      )}
+
+      {/* ── 2. SATELLITE STATUS ────────────────────────────────── */}
+      <SectionLabel
+        title="СПУТНИКОВЫЙ АНАЛИЗ"
+        right={satellite?.status === 'ready' ? 'Sentinel Hub · live' : undefined}
+      />
+      <Card style={styles.satCard}>
+        <View style={styles.satMissionRow}>
+          <Text style={styles.satMission} numberOfLines={1}>Sentinel-2 L2A · 10 м/пикс</Text>
+          <Badge
+            label={satellite?.status === 'ready' ? 'Готово' : 'Ожидание'}
+            variant={satellite?.status === 'ready' ? 'success' : 'neutral'}
+          />
+        </View>
+
+        <View style={styles.hairline} />
+
+        {satellite?.status === 'ready' && latestObs ? (
+          <>
+            <View style={styles.satStatsRow}>
+              <View style={styles.satStatCell}>
+                <Text style={[styles.satStatVal, { color: ndviStatusColor }]}>{latestObs.ndviMean.toFixed(2)}</Text>
+                <Text style={styles.satStatLabel}>NDVI поля</Text>
+              </View>
+              <View style={styles.vertDiv} />
+              <View style={styles.satStatCell}>
+                <Text style={styles.satStatVal}>{latestObs.ndmiMean != null ? latestObs.ndmiMean.toFixed(2) : '—'}</Text>
+                <Text style={styles.satStatLabel}>NDMI поля</Text>
+              </View>
+              <View style={styles.vertDiv} />
+              <View style={styles.satStatCell}>
+                <Text style={styles.satStatVal}>{latestObs.cloudCoveragePercent.toFixed(0)}%</Text>
+                <Text style={styles.satStatLabel}>Облачность</Text>
+              </View>
+            </View>
+            <View style={styles.hairline} />
+            <View style={styles.satObsRow}>
+              <Text style={styles.satObsText} numberOfLines={1}>Снимок от {latestObs.date}</Text>
+            </View>
+            {latestObs.anomalyDetected && latestObs.anomalyFactor && (
+              <View style={styles.anomalyBox}>
+                <Text style={styles.anomalyText}>{latestObs.anomalyFactor}</Text>
+              </View>
+            )}
+          </>
+        ) : (
+          <View style={styles.pendingBox}>
+            <Text style={styles.pendingText}>
+              {satellite?.message ?? 'Обработанный снимок Sentinel-2 для этого поля пока недоступен.'}
+            </Text>
+          </View>
+        )}
+      </Card>
+
+      {/* ── 3. WEATHER ─────────────────────────────────────────── */}
+      {weather && (
+        <>
+          <SectionLabel title="АГРОМЕТЕОРОЛОГИЯ" right="Open-Meteo · актуально" />
+          <Card style={styles.weatherCard}>
+            <View style={styles.weatherGrid}>
+              <WeatherCell value={`${weather.current.temperature.toFixed(1)}°C`} label="Температура" />
+              <WeatherCell value={`${weather.current.humidity}%`} label="Влажность" />
+              <WeatherCell value={`${weather.current.windSpeed.toFixed(1)} м/с`} label="Ветер сейчас" />
+              <WeatherCell value={`${weather.forecast7d.precipSum.toFixed(1)} мм`} label="Осадки за 7 дней" />
+            </View>
+
+            {weather.forecast7d.evapotranspiration > 0 && (
+              <>
+                <View style={styles.hairline} />
+                <View style={styles.etRow}>
+                  <Text style={styles.etLabel} numberOfLines={1}>Испаряемость за 7 дней (ET₀)</Text>
+                  <Text style={styles.etValue}>{weather.forecast7d.evapotranspiration.toFixed(1)} мм</Text>
+                </View>
+              </>
+            )}
+
+            {weather.forecast7d.gddSum != null && (
+              <>
+                <View style={styles.hairline} />
+                <View style={styles.etRow}>
+                  <Text style={styles.etLabel} numberOfLines={1}>Сумма эфф. температур (GDD, база 5°C)</Text>
+                  <Text style={styles.etValue}>{weather.forecast7d.gddSum.toFixed(0)}°</Text>
+                </View>
+              </>
+            )}
+
+            {weather.alerts.length > 0 && (
+              <View style={styles.alertBox}>
+                <Text style={styles.alertTitle}>{weather.alerts[0].title}</Text>
+                <Text style={styles.alertDesc}>{weather.alerts[0].description}</Text>
+              </View>
+            )}
+          </Card>
+        </>
+      )}
+
+      {/* ── 4. MAP ─────────────────────────────────────────────── */}
+      <SectionLabel title="КАРТА УЧАСТКА" />
+      <View style={styles.segmentedWrap}>
+        <SegTab label="Зоны риска" active={mapMode === 'zones'} onPress={() => setMapMode('zones')} />
+        <SegTab label="NDVI-снимок" active={mapMode === 'satellite'} onPress={() => setMapMode('satellite')} />
+        <SegTab label="Контур" active={mapMode === 'boundary'} onPress={() => setMapMode('boundary')} />
       </View>
 
       <View style={styles.mapFrame}>
         {Platform.OS === 'web' ? (
           <View style={styles.mapFallback}>
-            <Text style={styles.mapFallbackText}>Карта доступна на мобильном устройстве</Text>
+            <Text style={styles.mapFallbackText}>Карта доступна на iOS / Android</Text>
           </View>
         ) : (
-          <MapView style={styles.map} initialRegion={region}>
+          <MapView style={styles.map} initialRegion={region} mapType={mapType}>
             <Polygon
               coordinates={field.boundary}
-              fillColor="rgba(27, 94, 32, 0.25)"
+              fillColor={mapMode === 'boundary' ? 'rgba(30,126,52,0.10)' : 'rgba(30,126,52,0.04)'}
               strokeColor={colors.primary}
               strokeWidth={2}
             />
+            {/* Реальная NDVI-тепловая карта поля из посотовой выборки Sentinel-2 */}
+            {mapMode === 'satellite' && zonesData?.ndviGrid.map((cell) => (
+              <Polygon
+                key={cell.id}
+                coordinates={cell.boundary}
+                fillColor={cell.color}
+                strokeColor="rgba(255,255,255,0.35)"
+                strokeWidth={0.5}
+              />
+            ))}
+            {mapMode === 'zones' && zonesData?.zones.map((zone) => (
+              <Polygon
+                key={zone.id}
+                coordinates={zone.boundary}
+                fillColor={zone.fillColor}
+                strokeColor={selectedZone?.id === zone.id ? '#1C1C1E' : zone.strokeColor}
+                strokeWidth={selectedZone?.id === zone.id ? 3 : 2}
+                tappable
+                onPress={() => setSelectedZone(zone)}
+              />
+            ))}
+            {mapMode === 'zones' && selectedZone && (
+              <Marker coordinate={selectedZone.centroid} title={selectedZone.title} description={`${selectedZone.areaHa.toFixed(1)} га`} />
+            )}
           </MapView>
         )}
 
         <View style={styles.mapTag}>
-          <Text style={styles.mapTagText}>Условная граница полигона</Text>
+          <Text style={styles.mapTagText} numberOfLines={1}>
+            {mapMode === 'zones'
+              ? 'Sentinel-2 · кластеры аномалий'
+              : mapMode === 'satellite'
+              ? (zonesData?.ndviGrid.length ? `NDVI-снимок · ${zonesData.ndviGrid.length} ячеек` : 'Ожидание снимка Sentinel-2')
+              : 'Кадастровый контур участка'}
+          </Text>
         </View>
+
+        {mapMode === 'satellite' && zonesData?.ndviRange && zonesData.ndviGrid.length > 0 && (
+          <View style={styles.ndviLegend}>
+            <Text style={styles.ndviLegendVal}>{zonesData.ndviRange.min.toFixed(2)}</Text>
+            <View style={styles.ndviLegendBar}>
+              {NDVI_LEGEND_COLORS.map((c, i) => (
+                <View key={i} style={[styles.ndviLegendSeg, { backgroundColor: c }]} />
+              ))}
+            </View>
+            <Text style={styles.ndviLegendVal}>{zonesData.ndviRange.max.toFixed(2)}</Text>
+          </View>
+        )}
+
+        {Platform.OS !== 'web' && (
+          <Pressable
+            onPress={() => setMapType((current) => (current === 'standard' ? 'satellite' : 'standard'))}
+            style={styles.mapTypeToggle}
+          >
+            <Text style={styles.mapTypeToggleText}>{mapType === 'standard' ? 'Спутник' : 'Схема'}</Text>
+          </Pressable>
+        )}
       </View>
 
-      {/* Technical Status Callout */}
-      <View style={styles.technicalBox}>
-        <Text style={styles.technicalTitle}>Спутниковая аналитика (NDVI)</Text>
-        <Text style={styles.technicalText}>
-          Подключение спутниковых снимков Sentinel/Landsat и расчёт вегетационных индексов планируется на этапе 3.
-        </Text>
-      </View>
+      {/* ── 5. RISK ZONES ──────────────────────────────────────── */}
+      {zonesData && zonesData.zones.length > 0 ? (
+        <>
+          <SectionLabel
+            title={`ОЧАГИ РИСКА — ${zonesData.zonesCount}`}
+            right={`${zonesData.totalSuspectAreaHa.toFixed(1)} га / ${zonesData.totalFieldAreaHa.toFixed(0)} га`}
+          />
 
-      {/* Primary Action Button */}
-      <Pressable
-        onPress={() => router.push({ pathname: '/field/[id]/new-inspection', params: { id: field.id } })}
-        style={({ pressed }) => [styles.actionButton, pressed && styles.actionPressed]}
-      >
-        <Text style={styles.actionButtonText}>+ Новый осмотр поля</Text>
-      </Pressable>
+          <View style={styles.zonePicker}>
+            {zonesData.zones.map((zone) => (
+              <ZonePill
+                key={zone.id}
+                zone={zone}
+                active={selectedZone?.id === zone.id}
+                onPress={() => setSelectedZone(zone)}
+              />
+            ))}
+          </View>
 
-      {/* Inspections History Section */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>ЖУРНАЛ ОСМОТРОВ ({inspections.length})</Text>
-      </View>
+          {selectedZone && (
+            <Card style={styles.zoneCard}>
+              {/* Zone metric row */}
+              <View style={styles.zoneMetrics}>
+                <View style={styles.zoneMetricCell}>
+                  <Text style={[styles.zoneMetricVal, { color: selectedZone.severity === 'critical' ? colors.danger : colors.warning }]}>
+                    {selectedZone.areaHa.toFixed(1)} га
+                  </Text>
+                  <Text style={styles.zoneMetricLabel}>{selectedZone.percentOfField.toFixed(1)}% поля</Text>
+                </View>
+                <View style={styles.vertDiv} />
+                <View style={styles.zoneMetricCell}>
+                  <Text style={styles.zoneMetricVal}>{selectedZone.ndviDeficit.toFixed(2)}</Text>
+                  <Text style={styles.zoneMetricLabel}>Δ NDVI</Text>
+                </View>
+                <View style={styles.vertDiv} />
+                <View style={styles.zoneMetricCell}>
+                  <Text style={styles.zoneMetricVal}>{selectedZone.ndmiDeficit.toFixed(2)}</Text>
+                  <Text style={styles.zoneMetricLabel}>Δ NDMI влага</Text>
+                </View>
+              </View>
+
+              <View style={styles.hairline} />
+
+              {/* Factor & Recommendation */}
+              <View style={styles.zoneInfoBlock}>
+                <Text style={styles.zoneInfoTitle}>Основной фактор</Text>
+                <Text style={styles.zoneInfoText}>{selectedZone.mainFactor}</Text>
+              </View>
+
+              <View style={styles.hairline} />
+
+              <View style={styles.zoneInfoBlock}>
+                <Text style={styles.zoneInfoTitle}>Рекомендация</Text>
+                <Text style={styles.zoneInfoText}>{selectedZone.recommendation}</Text>
+              </View>
+
+              <View style={styles.hairline} />
+
+              <View style={styles.zonePersistenceRow}>
+                <Text style={styles.zonePersistenceText}>{selectedZone.persistenceStatus}</Text>
+              </View>
+
+              {/* Dispatch button */}
+              <Pressable
+                onPress={() =>
+                  router.push({
+                    pathname: '/field/[id]/new-inspection',
+                    params: {
+                      id: field.id,
+                      targetLat: String(selectedZone.centroid.latitude),
+                      targetLng: String(selectedZone.centroid.longitude),
+                      zoneTitle: `${selectedZone.title} (${selectedZone.areaHa.toFixed(1)} га)`,
+                    },
+                  })
+                }
+                style={({ pressed }) => [styles.dispatchBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.dispatchBtnText}>Выехать на осмотр этого очага →</Text>
+              </Pressable>
+            </Card>
+          )}
+
+          {/* Scouting savings */}
+          {zonesData.benchmark && (
+            <Card style={styles.savingsCard}>
+              <InfoRow
+                label="Целевой скаутинг"
+                value={`${zonesData.benchmark.economicScouting.targetInspectionHa.toFixed(1)} га из ${zonesData.benchmark.economicScouting.fieldAreaHa.toFixed(0)} га`}
+              />
+              <View style={styles.hairline} />
+              <InfoRow
+                label="Экономия выездов"
+                value={`~${(zonesData.benchmark.economicScouting.estimatedSeasonSavingsKzt / 1000).toFixed(0)} тыс ₸/сезон`}
+                valueColor={colors.success}
+              />
+              <View style={styles.hairline} />
+              <InfoRow
+                label="Источник данных"
+                value={zonesData.dataSource ?? zonesData.satelliteMission}
+              />
+            </Card>
+          )}
+        </>
+      ) : (
+        <>
+          <SectionLabel title="ОЧАГИ РИСКА" />
+          <Card style={styles.pendingZonesCard}>
+            <Text style={styles.pendingZonesTitle}>Геометрия очагов недоступна</Text>
+            <Text style={styles.pendingText}>
+              {zonesData?.message ?? 'Требуется попиксельная обработка снимка Sentinel-2.'}
+            </Text>
+          </Card>
+        </>
+      )}
+
+      {/* ── 6. ACTIONS ─────────────────────────────────────────── */}
+      <SectionLabel title="ДЕЙСТВИЯ" />
+      <Card style={styles.actionsCard}>
+        <ActionRow
+          title="+ Произвольный осмотр поля"
+          onPress={() => router.push({ pathname: '/field/[id]/new-inspection', params: { id: field.id } })}
+        />
+        <View style={styles.hairline} />
+        <ActionRow
+          title="Редактировать контур и метраж"
+          onPress={() => router.push({ pathname: '/field/new', params: { fieldId: field.id, profileId: field.profileId } })}
+        />
+        <View style={styles.hairline} />
+        <ActionRow title="Скачать GeoJSON для QGIS" onPress={() => void openExport('geojson')} />
+        <View style={styles.hairline} />
+        <ActionRow title="Скачать CSV временного ряда" onPress={() => void openExport('csv')} />
+        <View style={styles.hairline} />
+        <ActionRow title="Скачать PDF-отчёт агронома" onPress={() => void openExport('pdf')} />
+        <View style={styles.hairline} />
+        <ActionRow title="Удалить участок" destructive onPress={confirmDelete} />
+      </Card>
+
+      {/* ── 7. INSPECTIONS ─────────────────────────────────────── */}
+      <SectionLabel title={`ЖУРНАЛ ОСМОТРОВ (${inspections.length})`} />
 
       {inspections.length === 0 ? (
         <EmptyState
           title="Осмотры отсутствуют"
-          text="Для этого поля пока не зафиксировано ни одного выездного наблюдения."
+          text="Нажмите «Выехать на осмотр» выше или используйте произвольный осмотр."
         />
       ) : (
-        <Card style={styles.inspectionsGroup}>
-          {inspections.map((inspection, index) => {
-            const isLast = index === inspections.length - 1;
-            return (
-              <View key={inspection.id}>
-                <Pressable
-                  onPress={() => router.push({ pathname: '/inspection/[id]', params: { id: inspection.id } })}
-                  style={({ pressed }) => [styles.inspectionRow, pressed && styles.rowPressed]}
-                >
-                  {inspection.photoUrl ? (
-                    <Image source={{ uri: inspection.photoUrl }} style={styles.thumbnail} />
-                  ) : (
-                    <View style={styles.noThumbnail}>
-                      <Text style={styles.noThumbnailText}>Акт</Text>
-                    </View>
-                  )}
-
-                  <View style={styles.inspectionMain}>
-                    <View style={styles.inspectionDateRow}>
-                      <Text style={styles.inspectionDate}>{formatDate(inspection.createdAt)}</Text>
-                      <Badge label="Сохранено" variant="success" />
-                    </View>
-                    <Text numberOfLines={1} style={styles.inspectionNote}>
-                      {inspection.note || 'Без текстового описания'}
-                    </Text>
+        <Card style={styles.inspGroup}>
+          {inspections.map((insp, idx) => (
+            <View key={insp.id}>
+              <Pressable
+                onPress={() => router.push({ pathname: '/inspection/[id]', params: { id: insp.id } })}
+                style={({ pressed }) => [styles.inspRow, pressed && styles.inspRowPressed]}
+              >
+                {insp.photoUrl ? (
+                  <Image source={{ uri: insp.photoUrl }} style={styles.thumb} />
+                ) : (
+                  <View style={styles.thumbPlaceholder}>
+                    <Text style={styles.thumbPlaceholderText}>АКТ</Text>
                   </View>
-
-                  <Text style={styles.chevron}>›</Text>
-                </Pressable>
-                {!isLast && <View style={styles.rowDivider} />}
-              </View>
-            );
-          })}
+                )}
+                <View style={styles.inspMain}>
+                  <View style={styles.inspTopRow}>
+                    <Text style={styles.inspDate}>{formatDate(insp.createdAt)}</Text>
+                    <Badge label="Сохранено" variant="success" />
+                  </View>
+                  <Text numberOfLines={2} style={styles.inspNote}>
+                    {insp.note || 'Без текстового описания'}
+                  </Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+              {idx < inspections.length - 1 && <View style={styles.inspDivider} />}
+            </View>
+          ))}
         </Card>
       )}
     </Screen>
   );
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function getCropAvatar(cropType: string) {
+  const t = cropType.toLowerCase();
+  if (t.includes('пшениц')) return { short: 'ПШ', bg: colors.cropWheatBg, text: colors.cropWheatText };
+  if (t.includes('рапс')) return { short: 'РП', bg: colors.cropRapeseedBg, text: colors.cropRapeseedText };
+  return { short: 'КР', bg: colors.cropPotatoBg, text: colors.cropPotatoText };
 }
 
+function formatDate(iso: string) {
+  return new Intl.DateTimeFormat('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  }).format(new Date(iso));
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
 const styles = StyleSheet.create({
+  // Layout
   content: {
     paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 32,
-    gap: 14,
+    paddingTop: 4,
+    paddingBottom: 36,
+    gap: 10,
   },
-  loader: {
+  center: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
@@ -232,99 +765,131 @@ const styles = StyleSheet.create({
     padding: 24,
     gap: 8,
   },
-  errorTitle: {
-    ...typography.headline,
-    color: colors.danger,
-  },
-  errorText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    textAlign: 'center',
-  },
-  retryButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginTop: 6,
-  },
-  retryText: {
-    fontFamily: fontFamilies.semiBold,
-    color: '#FFFFFF',
-    fontSize: 13,
-  },
+  loadingText: { fontFamily: fontFamilies.medium, fontSize: 13, color: colors.textSecondary },
+  errTitle: { fontFamily: fontFamilies.semiBold, fontSize: 15, color: colors.danger },
+  errText: { fontFamily: fontFamilies.regular, fontSize: 13, color: colors.textSecondary, textAlign: 'center' },
+  retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, marginTop: 6 },
+  retryText: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: '#FFF' },
 
-  // Overview Card
-  overviewCard: {
-    padding: 14,
-    gap: 10,
-  },
-  overviewHeader: {
-    gap: 2,
-  },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  fieldName: {
-    ...typography.screenTitle,
-    color: colors.text,
-  },
-  fieldId: {
-    ...typography.metaMono,
-    color: colors.muted,
-  },
-  tableRow: {
+  // Common
+  hairline: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
+  vertDiv: { width: StyleSheet.hairlineWidth, backgroundColor: colors.border, alignSelf: 'stretch' },
+  pressed: { opacity: 0.8 },
+
+  // Overview card
+  overviewCard: { padding: 14, gap: 0 },
+  overviewHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingBottom: 12 },
+  cropAvatar: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
+  cropAvatarText: { fontFamily: fontFamilies.bold, fontSize: 15 },
+  overviewTitles: { flex: 1, minWidth: 0, gap: 3 },
+  fieldName: { fontFamily: fontFamilies.bold, fontSize: 17, color: colors.text },
+  fieldCrop: { fontFamily: fontFamilies.regular, fontSize: 13, color: colors.textSecondary },
+  metricsRow: { flexDirection: 'row', alignItems: 'center' },
+
+  // Classification card
+  classCard: { padding: 0, gap: 0 },
+  classHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 2,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
   },
-  tableLabel: {
-    ...typography.body,
+  classRule: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.textSecondary },
+  classDescription: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    lineHeight: 18,
     color: colors.textSecondary,
+    paddingHorizontal: 14,
+    paddingBottom: 10,
   },
-  tableValue: {
-    ...typography.headline,
-    color: colors.text,
-  },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
-  },
+  classMetrics: { flexDirection: 'row', alignItems: 'center' },
 
-  // Section Headers
-  sectionHeaderRow: {
-    paddingHorizontal: 4,
-    marginTop: 2,
+  // Satellite card
+  satCard: { padding: 0, gap: 0 },
+  satMissionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
   },
-  sectionTitle: {
-    ...typography.sectionHeader,
-    color: colors.textSecondary,
+  satMission: { flex: 1, minWidth: 0, fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary },
+  satStatsRow: { flexDirection: 'row', alignItems: 'center' },
+  satStatCell: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  satStatVal: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.text },
+  satStatLabel: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted, marginTop: 3 },
+  satObsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    gap: 8,
   },
+  satObsText: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary, flex: 1 },
+  satObsCloud: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.muted },
+  anomalyBox: {
+    margin: 10,
+    marginTop: 0,
+    backgroundColor: colors.warningSoft,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#F59E0B',
+  },
+  anomalyText: { fontFamily: fontFamilies.medium, fontSize: 12, color: '#78350F', lineHeight: 17 },
+  pendingBox: { paddingHorizontal: 14, paddingVertical: 14 },
+  pendingText: { fontFamily: fontFamilies.regular, fontSize: 13, lineHeight: 18, color: colors.textSecondary },
+  pendingZonesCard: { padding: 14, gap: 6 },
+  pendingZonesTitle: { fontFamily: fontFamilies.semiBold, fontSize: 14, color: colors.text },
 
-  // Map Frame
-  mapFrame: {
-    height: 190,
+  // Weather card
+  weatherCard: { padding: 0, gap: 0, overflow: 'hidden' },
+  weatherGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  etRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  etLabel: { fontFamily: fontFamilies.regular, fontSize: 13, color: colors.textSecondary },
+  etValue: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.text },
+  alertBox: {
+    margin: 10,
+    backgroundColor: '#FEF3C7',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#F59E0B',
+  },
+  alertTitle: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: '#92400E' },
+  alertDesc: { fontFamily: fontFamilies.regular, fontSize: 12, color: '#78350F', lineHeight: 17, marginTop: 2 },
+
+  // Map
+  segmentedWrap: {
+    flexDirection: 'row',
+    backgroundColor: '#E5E5EA',
     borderRadius: 10,
+    padding: 2,
+    gap: 2,
+  },
+  mapFrame: {
+    height: 230,
+    borderRadius: 14,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
     backgroundColor: '#EAECE8',
   },
-  map: {
-    flex: 1,
-  },
-  mapFallback: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mapFallbackText: {
-    ...typography.caption,
-    color: colors.muted,
-  },
+  map: { flex: 1 },
+  mapFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  mapFallbackText: { fontFamily: fontFamilies.regular, fontSize: 12, color: colors.muted },
   mapTag: {
     position: 'absolute',
     left: 8,
@@ -332,113 +897,98 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.92)',
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 4,
+    borderRadius: 6,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
+    maxWidth: '80%',
   },
-  mapTagText: {
-    ...typography.metaMono,
-    fontSize: 10.5,
-    color: colors.textSecondary,
-  },
-
-  // Technical Box
-  technicalBox: {
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
+  mapTagText: { fontFamily: fontFamilies.medium, fontSize: 10.5, color: colors.text },
+  mapTypeToggle: {
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    backgroundColor: 'rgba(28,28,30,0.72)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: 8,
-    padding: 12,
-    gap: 3,
   },
-  technicalTitle: {
-    fontFamily: fontFamilies.semiBold,
-    fontSize: 12.5,
-    color: colors.text,
-  },
-  technicalText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-
-  // Action Button
-  actionButton: {
-    backgroundColor: colors.primary,
-    height: 44,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionPressed: {
-    opacity: 0.8,
-  },
-  actionButtonText: {
-    ...typography.button,
-    color: '#FFFFFF',
-  },
-
-  // Inspections Inset Group
-  inspectionsGroup: {
-    padding: 0,
-  },
-  inspectionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 10,
-  },
-  rowPressed: {
-    backgroundColor: '#F5F5F7',
-  },
-  thumbnail: {
-    width: 42,
-    height: 42,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-  },
-  noThumbnail: {
-    width: 42,
-    height: 42,
-    borderRadius: 6,
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  noThumbnailText: {
-    ...typography.metaMono,
-    fontSize: 10,
-    color: colors.muted,
-  },
-  inspectionMain: {
-    flex: 1,
-    gap: 2,
-  },
-  inspectionDateRow: {
+  mapTypeToggleText: { fontFamily: fontFamilies.semiBold, fontSize: 11.5, color: '#FFFFFF' },
+  ndviLegend: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 40,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
   },
-  inspectionDate: {
-    ...typography.headline,
-    fontSize: 13.5,
-    color: colors.text,
+  ndviLegendBar: { flex: 1, flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden' },
+  ndviLegendSeg: { flex: 1 },
+  ndviLegendVal: { fontFamily: fontFamilies.semiBold, fontSize: 10.5, color: colors.text },
+
+  // Zone picker
+  zonePicker: { flexDirection: 'row', gap: 8 },
+
+  // Zone detail card
+  zoneCard: { padding: 0, gap: 0 },
+  zoneMetrics: { flexDirection: 'row', alignItems: 'center' },
+  zoneMetricCell: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  zoneMetricVal: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.text },
+  zoneMetricLabel: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted, marginTop: 3 },
+  zoneInfoBlock: { paddingHorizontal: 14, paddingVertical: 10, gap: 4 },
+  zoneInfoTitle: { fontFamily: fontFamilies.semiBold, fontSize: 11.5, letterSpacing: 0.3, color: colors.muted },
+  zoneInfoText: { fontFamily: fontFamilies.regular, fontSize: 13.5, color: colors.text, lineHeight: 19 },
+  zonePersistenceRow: { paddingHorizontal: 14, paddingVertical: 9 },
+  zonePersistenceText: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary },
+  dispatchBtn: {
+    margin: 12,
+    marginTop: 4,
+    backgroundColor: colors.primary,
+    height: 46,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  inspectionNote: {
-    ...typography.caption,
-    color: colors.textSecondary,
+  dispatchBtnText: { fontFamily: fontFamilies.semiBold, fontSize: 14, color: '#FFF' },
+
+  // Savings card
+  savingsCard: { padding: 14, gap: 0 },
+
+  // Actions card
+  actionsCard: { padding: 0, gap: 0 },
+
+  // Inspections
+  inspGroup: { padding: 0 },
+  inspRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 12,
   },
-  chevron: {
-    fontSize: 18,
-    color: colors.border,
-    fontWeight: '600',
+  inspRowPressed: { backgroundColor: colors.surfaceSecondary },
+  thumb: { width: 46, height: 46, borderRadius: 8, backgroundColor: colors.border },
+  thumbPlaceholder: {
+    width: 46,
+    height: 46,
+    borderRadius: 8,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  rowDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
-    marginLeft: 64,
-  },
+  thumbPlaceholderText: { fontFamily: fontFamilies.bold, fontSize: 10, color: colors.muted },
+  inspMain: { flex: 1, gap: 3 },
+  inspTopRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  inspDate: { fontFamily: fontFamilies.semiBold, fontSize: 13.5, color: colors.text, flex: 1 },
+  inspNote: { fontFamily: fontFamilies.regular, fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
+  chevron: { fontFamily: fontFamilies.regular, fontSize: 20, color: '#C7C7CC' },
+  inspDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: 72 },
 });

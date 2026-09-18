@@ -1,7 +1,12 @@
 .DS_Store
+*.env
+.env
+.env.*
+!.env.example
 
 # Local AI tooling installed for this workspace
 .agents/
 skills/
 no-slop-ui/
 skills-lock.json
+

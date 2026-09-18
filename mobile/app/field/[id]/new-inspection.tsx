@@ -6,10 +6,9 @@ import {
   ImageStyle,
   Pressable,
   StyleSheet,
-  Text,
-  TextInput,
   View,
 } from 'react-native';
+import { Text, TextInput } from '../../../src/components/AppText';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -23,13 +22,31 @@ import { fontFamilies, typography } from '../../../src/theme/typography';
 type Coordinates = { latitude: number; longitude: number };
 
 export default function NewInspectionScreen() {
-  const { id: fieldId } = useLocalSearchParams<{ id: string }>();
+  const { id: fieldId, targetLat, targetLng, zoneTitle } = useLocalSearchParams<{
+    id: string;
+    targetLat?: string;
+    targetLng?: string;
+    zoneTitle?: string;
+  }>();
   const router = useRouter();
   const [note, setNote] = useState('');
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (targetLat && targetLng) {
+      const lat = parseFloat(targetLat);
+      const lng = parseFloat(targetLng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        setCoordinates({ latitude: lat, longitude: lng });
+        if (zoneTitle) {
+          setNote(`[Проверка спутникового очага: ${zoneTitle}]\n`);
+        }
+      }
+    }
+  }, [targetLat, targetLng, zoneTitle]);
 
   useEffect(() => {
     ImagePicker.getPendingResultAsync().then((result) => {
@@ -184,10 +201,10 @@ export default function NewInspectionScreen() {
         </Card>
       </View>
 
-      {/* Technical Status Callout */}
-      <View style={styles.technicalBox}>
-        <Text style={styles.technicalText}>
-          Сохранение выполняется в локальную базу SQLite на ноутбуке. AI-анализ на данном этапе не применяется.
+      {/* Status Note */}
+      <View style={styles.noteBox}>
+        <Text style={styles.noteText}>
+          Акт осмотра сохраняется в постоянный журнал хозяйства и привязывается к координатам поля.
         </Text>
       </View>
 
@@ -200,7 +217,7 @@ export default function NewInspectionScreen() {
         {saving ? (
           <ActivityIndicator size="small" color="#FFFFFF" />
         ) : (
-          <Text style={styles.submitButtonText}>Зафиксировать и отправить</Text>
+          <Text style={styles.submitButtonText}>Сохранить акт осмотра</Text>
         )}
       </Pressable>
     </Screen>
@@ -210,39 +227,44 @@ export default function NewInspectionScreen() {
 const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingTop: 4,
     paddingBottom: 36,
-    gap: 14,
+    gap: 12,
   },
   titleBox: {
     gap: 2,
     paddingHorizontal: 2,
   },
   screenTitle: {
-    ...typography.screenTitle,
+    fontFamily: fontFamilies.bold,
+    fontSize: 18,
     color: colors.text,
   },
   screenSubtitle: {
-    ...typography.metaMono,
-    color: colors.muted,
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    color: colors.textSecondary,
   },
 
   section: {
     gap: 6,
   },
   sectionLabel: {
-    ...typography.sectionHeader,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    letterSpacing: 0.5,
     color: colors.textSecondary,
     paddingHorizontal: 4,
   },
 
   // Photo Cards
   photoControlCard: {
-    padding: 12,
+    padding: 14,
     gap: 10,
   },
   photoHint: {
-    ...typography.caption,
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
     color: colors.textSecondary,
   },
   photoButtonsRow: {
@@ -252,13 +274,13 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceSecondary,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    paddingVertical: 10,
-    borderRadius: 8,
+    paddingVertical: 11,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
   secondaryButtonText: {
-    fontFamily: fontFamilies.medium,
+    fontFamily: fontFamilies.semiBold,
     fontSize: 13.5,
     color: colors.text,
   },
@@ -290,7 +312,7 @@ const styles = StyleSheet.create({
   },
   textInput: {
     fontFamily: fontFamilies.regular,
-    fontSize: 14.5,
+    fontSize: 14,
     color: colors.text,
     minHeight: 85,
     lineHeight: 20,
@@ -311,12 +333,13 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   locationTitle: {
-    ...typography.headline,
+    fontFamily: fontFamilies.semiBold,
     fontSize: 14,
     color: colors.text,
   },
   locationSubtitle: {
-    ...typography.caption,
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
     color: colors.muted,
   },
   smallButton: {
@@ -325,7 +348,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     paddingHorizontal: 12,
     paddingVertical: 7,
-    borderRadius: 6,
+    borderRadius: 8,
   },
   smallButtonText: {
     fontFamily: fontFamilies.semiBold,
@@ -333,25 +356,22 @@ const styles = StyleSheet.create({
     color: colors.primary,
   },
 
-  // Technical Box
-  technicalBox: {
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    borderRadius: 8,
-    padding: 10,
+  // Note Box
+  noteBox: {
+    paddingHorizontal: 4,
   },
-  technicalText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+  noteText: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11.5,
+    color: colors.muted,
     lineHeight: 16,
   },
 
   // Submit Button
   submitButton: {
     backgroundColor: colors.primary,
-    height: 44,
-    borderRadius: 10,
+    height: 46,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 4,
@@ -360,7 +380,8 @@ const styles = StyleSheet.create({
     opacity: 0.75,
   },
   submitButtonText: {
-    ...typography.button,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 14,
     color: '#FFFFFF',
   },
 });

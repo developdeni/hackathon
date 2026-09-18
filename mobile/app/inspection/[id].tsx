@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, ImageStyle, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, ImageStyle, StyleSheet, View } from 'react-native';
+import { Text } from '../../src/components/AppText';
 import { useLocalSearchParams } from 'expo-router';
 
 import { Badge } from '../../src/components/Badge';
@@ -119,11 +120,11 @@ export default function InspectionScreen() {
         </Card>
       </View>
 
-      {/* Technical Status Callout */}
-      <View style={styles.technicalBox}>
-        <Text style={styles.technicalTitle}>Статус AI-обработки</Text>
-        <Text style={styles.technicalText}>
-          Анализ не выполнялся. Фотография сохранена на ноутбуке в исходном разрешении и готова к пакетной обработке моделью детекции на этапе 2.
+      {/* Agronomic Verification Note */}
+      <View style={styles.verificationBox}>
+        <Text style={styles.verificationTitle}>Верификация наземного обследования</Text>
+        <Text style={styles.verificationText}>
+          Фотоматериал привязан к кадастровому контуру поля для подтверждения спутниковых аномалий Sentinel-2 L2A.
         </Text>
       </View>
     </Screen>
@@ -143,9 +144,9 @@ function formatDate(value: string) {
 const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingTop: 4,
     paddingBottom: 32,
-    gap: 14,
+    gap: 12,
   },
   loader: {
     flex: 1,
@@ -156,11 +157,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   errorTitle: {
-    ...typography.headline,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 15,
     color: colors.danger,
   },
   errorText: {
-    ...typography.caption,
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
     color: colors.textSecondary,
   },
 
@@ -173,13 +176,16 @@ const styles = StyleSheet.create({
   },
   headerMain: {
     gap: 2,
+    flex: 1,
   },
   screenTitle: {
-    ...typography.screenTitle,
+    fontFamily: fontFamilies.bold,
+    fontSize: 18,
     color: colors.text,
   },
   headerMeta: {
-    ...typography.metaMono,
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
     color: colors.muted,
   },
 
@@ -187,6 +193,7 @@ const styles = StyleSheet.create({
   photoCard: {
     padding: 0,
     overflow: 'hidden',
+    borderRadius: 14,
   },
   photo: {
     width: '100%',
@@ -199,7 +206,9 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   sectionLabel: {
-    ...typography.sectionHeader,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    letterSpacing: 0.5,
     color: colors.textSecondary,
     paddingHorizontal: 4,
   },
@@ -207,7 +216,8 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   noteText: {
-    ...typography.body,
+    fontFamily: fontFamilies.regular,
+    fontSize: 14,
     color: colors.text,
     lineHeight: 20,
   },
@@ -224,15 +234,18 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   tableLabel: {
-    ...typography.caption,
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
     color: colors.textSecondary,
   },
   tableValue: {
-    ...typography.captionBold,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13.5,
     color: colors.text,
   },
   tableValueMono: {
-    ...typography.metaMono,
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
     color: colors.text,
   },
   divider: {
@@ -240,22 +253,23 @@ const styles = StyleSheet.create({
     backgroundColor: colors.border,
   },
 
-  // Technical Box
-  technicalBox: {
+  // Verification Box
+  verificationBox: {
     backgroundColor: colors.surfaceSecondary,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
     gap: 3,
   },
-  technicalTitle: {
+  verificationTitle: {
     fontFamily: fontFamilies.semiBold,
     fontSize: 12.5,
     color: colors.text,
   },
-  technicalText: {
-    ...typography.caption,
+  verificationText: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11.5,
     color: colors.textSecondary,
     lineHeight: 16,
   },

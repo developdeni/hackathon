@@ -1,30 +1,38 @@
 export const colors = {
-  // iOS System Grouped Backgrounds
-  background: '#F2F2F7',
+  // iOS grouped backgrounds
+  background: '#EFEFF4',
   surface: '#FFFFFF',
-  surfaceSecondary: '#F9F9FB',
+  surfaceSecondary: '#F4F4F7',
 
-  // Strict Agricultural Emerald (Production accent)
-  primary: '#1B5E20',
-  primaryDark: '#0E3A14',
+  // Agricultural accents
+  primary: '#1E7E34',
+  primaryDark: '#0D531E',
   primarySoft: '#E8F5E9',
 
-  // iOS System Typography
+  // Crop markers
+  cropWheatBg: '#E8F5E9',
+  cropWheatText: '#1B5E20',
+  cropRapeseedBg: '#FFF9C4',
+  cropRapeseedText: '#B45309',
+  cropPotatoBg: '#FFE0B2',
+  cropPotatoText: '#C05621',
+
+  // Typography
   text: '#1C1C1E',
-  textSecondary: '#636366',
+  textSecondary: '#707579',
   muted: '#8E8E93',
 
-  // iOS Hairline Separators
+  // Hairline Separators
   border: '#E5E5EA',
-  borderLight: '#F2F2F7',
+  borderLight: '#ECECED',
 
-  // Semantic Status Tones (Restrained)
+  // Semantic Status
   success: '#2E7D32',
   successSoft: '#E8F5E9',
-  warning: '#B45309',
+  warning: '#D97706',
   warningSoft: '#FEF3C7',
-  danger: '#C62828',
+  danger: '#D32F2F',
   dangerSoft: '#FFEBEE',
-  info: '#1565C0',
-  infoSoft: '#E3F2FD',
+  info: '#2481CC',
+  infoSoft: '#E7F2FA',
 };
