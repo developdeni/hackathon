@@ -31,6 +31,7 @@ export default function NewInspectionScreen() {
   const router = useRouter();
   const [note, setNote] = useState('');
   const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null);
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -52,6 +53,7 @@ export default function NewInspectionScreen() {
     ImagePicker.getPendingResultAsync().then((result) => {
       if (result && 'canceled' in result && !result.canceled && result.assets[0]) {
         setPhotoUri(result.assets[0].uri);
+        setPhotoBase64(result.assets[0].base64 ?? null);
       }
     });
   }, []);
@@ -62,9 +64,14 @@ export default function NewInspectionScreen() {
       Alert.alert('Доступ ограничен', 'Разрешите доступ к камере в настройках устройства.');
       return;
     }
-    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.85 });
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.85,
+      base64: true,
+    });
     if (!result.canceled && result.assets[0]) {
       setPhotoUri(result.assets[0].uri);
+      setPhotoBase64(result.assets[0].base64 ?? null);
     }
   }
 
@@ -74,11 +81,17 @@ export default function NewInspectionScreen() {
       Alert.alert('Доступ ограничен', 'Разрешите доступ к фото в настройках устройства.');
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.85 });
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.85,
+      base64: true,
+    });
     if (!result.canceled && result.assets[0]) {
       setPhotoUri(result.assets[0].uri);
+      setPhotoBase64(result.assets[0].base64 ?? null);
     }
   }
+
 
   async function addLocation() {
     setLocating(true);
@@ -109,6 +122,7 @@ export default function NewInspectionScreen() {
         fieldId,
         note: note.trim(),
         photoUri,
+        photoBase64,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
       });
@@ -118,6 +132,7 @@ export default function NewInspectionScreen() {
       setSaving(false);
     }
   }
+
 
   return (
     <Screen contentStyle={styles.content}>
@@ -133,9 +148,16 @@ export default function NewInspectionScreen() {
         {photoUri ? (
           <Card style={styles.photoPreviewCard}>
             <Image source={{ uri: photoUri }} style={styles.photoPreview as ImageStyle} />
-            <Pressable onPress={() => setPhotoUri(null)} style={styles.removePhotoButton}>
+            <Pressable
+              onPress={() => {
+                setPhotoUri(null);
+                setPhotoBase64(null);
+              }}
+              style={styles.removePhotoButton}
+            >
               <Text style={styles.removePhotoText}>Удалить прикреплённый снимок</Text>
             </Pressable>
+
           </Card>
         ) : (
           <Card style={styles.photoControlCard}>

@@ -18,7 +18,7 @@ import { Screen } from '../../src/components/Screen';
 import { createField, detectFieldBoundary, getField, updateField } from '../../src/services/api';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
-import { Coordinate, Field } from '../../src/types/domain';
+import { AutoBoundaryResult, Coordinate, Field } from '../../src/types/domain';
 
 const DEFAULT_CENTER: Coordinate = { latitude: 53.283, longitude: 69.38 };
 const DEFAULT_WIDTH_M = 800;
@@ -43,8 +43,12 @@ export default function NewFieldScreen() {
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [segmenting, setSegmenting] = useState(false);
-  const [editMode, setEditMode] = useState<'move' | 'corners'>('corners');
+  const [editMode, setEditMode] = useState<'move' | 'corners' | 'auto'>('corners');
   const [activeCorner, setActiveCorner] = useState<number | null>(null);
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>('satellite');
+  const [autoSeed, setAutoSeed] = useState<Coordinate>(DEFAULT_CENTER);
+  const [autoResult, setAutoResult] = useState<AutoBoundaryResult | null>(null);
+  const markerPressHandledRef = useRef(false);
 
   useEffect(() => {
     if (!fieldId) return;
@@ -82,6 +86,7 @@ export default function NewFieldScreen() {
     setWidthMeters(String(Math.round(size.widthM)));
     setHeightMeters(String(Math.round(size.heightM)));
     setBoundary(nextBoundary);
+    setAutoSeed(bounds.center);
   }
 
   function rebuildFromCenterAndSize() {
@@ -97,18 +102,108 @@ export default function NewFieldScreen() {
     mapRef.current?.animateToRegion(regionFromBoundary(nextBoundary), 250);
   }
 
-  function handleMapPress(event: MapPressEvent) {
-    if (editMode === 'move') {
-      const nextCenter = event.nativeEvent.coordinate;
-      setCenterLat(formatCoord(nextCenter.latitude));
-      setCenterLng(formatCoord(nextCenter.longitude));
-      const width = parseMeters(widthMeters) ?? DEFAULT_WIDTH_M;
-      const height = parseMeters(heightMeters) ?? DEFAULT_HEIGHT_M;
-      setBoundary(buildRectangle(nextCenter, width, height));
+  function addCornerAtCoordinate(point: Coordinate) {
+    if (boundary.length < 3) {
+      const next = [...boundary, point];
+      setBoundary(next);
+      syncMetaFromBoundary(next);
+      setActiveCorner(next.length - 1);
       return;
     }
-    if (editMode === 'corners' && activeCorner !== null) {
-      updateCorner(activeCorner, event.nativeEvent.coordinate);
+    let bestIndex = 0;
+    let minDistance = Infinity;
+    for (let i = 0; i < boundary.length; i++) {
+      const p1 = boundary[i];
+      const p2 = boundary[(i + 1) % boundary.length];
+      const dist = distanceToSegment(point, p1, p2);
+      if (dist < minDistance) {
+        minDistance = dist;
+        bestIndex = i + 1;
+      }
+    }
+    const next = [...boundary];
+    next.splice(bestIndex, 0, point);
+    setBoundary(next);
+    syncMetaFromBoundary(next);
+    setActiveCorner(bestIndex);
+  }
+
+  function addCornerAtMidpoint() {
+    if (boundary.length < 2) return;
+    let longestIdx = 0;
+    let maxDistSq = -1;
+    for (let i = 0; i < boundary.length; i++) {
+      const p1 = boundary[i];
+      const p2 = boundary[(i + 1) % boundary.length];
+      const d = (p1.latitude - p2.latitude) ** 2 + (p1.longitude - p2.longitude) ** 2;
+      if (d > maxDistSq) {
+        maxDistSq = d;
+        longestIdx = i;
+      }
+    }
+    const p1 = boundary[longestIdx];
+    const p2 = boundary[(longestIdx + 1) % boundary.length];
+    const mid: Coordinate = {
+      latitude: (p1.latitude + p2.latitude) / 2,
+      longitude: (p1.longitude + p2.longitude) / 2,
+    };
+    const next = [...boundary];
+    next.splice(longestIdx + 1, 0, mid);
+    setBoundary(next);
+    syncMetaFromBoundary(next);
+    setActiveCorner(longestIdx + 1);
+  }
+
+  function removeCornerByIndex(index: number) {
+    if (boundary.length <= 3) {
+      Alert.alert('Минимум 3 угла', 'Контур поля не может содержать меньше трёх вершин.');
+      return;
+    }
+    const next = boundary.filter((_, idx) => idx !== index);
+    setBoundary(next);
+    syncMetaFromBoundary(next);
+    if (activeCorner === index) {
+      setActiveCorner(null);
+    } else if (activeCorner !== null && activeCorner > index) {
+      setActiveCorner(activeCorner - 1);
+    }
+  }
+
+  function removeActiveCorner() {
+    if (activeCorner === null) return;
+    removeCornerByIndex(activeCorner);
+  }
+
+  function handleMapPress(event: MapPressEvent) {
+    if (markerPressHandledRef.current) return;
+
+    if (editMode === 'auto') {
+      const point = event.nativeEvent.coordinate;
+      setAutoSeed(point);
+      void autoBoundaryFromSatellite(point);
+      return;
+    }
+    if (editMode === 'move') {
+      const nextCenter = event.nativeEvent.coordinate;
+      const oldBounds = getBounds(boundary);
+      const deltaLat = nextCenter.latitude - oldBounds.center.latitude;
+      const deltaLng = nextCenter.longitude - oldBounds.center.longitude;
+      const next = boundary.map((pt) => ({
+        latitude: pt.latitude + deltaLat,
+        longitude: pt.longitude + deltaLng,
+      }));
+      setBoundary(next);
+      syncMetaFromBoundary(next);
+      setAutoSeed(nextCenter);
+      return;
+    }
+    if (editMode === 'corners') {
+      if (activeCorner !== null) {
+        updateCorner(activeCorner, event.nativeEvent.coordinate);
+        setActiveCorner(null);
+      } else {
+        addCornerAtCoordinate(event.nativeEvent.coordinate);
+      }
     }
   }
 
@@ -129,6 +224,7 @@ export default function NewFieldScreen() {
     });
   }
 
+
   function alignToRectangle() {
     const bounds = getBounds(boundary);
     const size = estimateWidthHeight(boundary);
@@ -138,25 +234,29 @@ export default function NewFieldScreen() {
     mapRef.current?.animateToRegion(regionFromBoundary(next), 250);
   }
 
-  async function autoBoundaryFromSatellite() {
+  async function autoBoundaryFromSatellite(seedOverride?: Coordinate) {
     if (segmenting) return;
-    const center = parseCenter(centerLat, centerLng) ?? getBounds(boundary).center;
+    const center = seedOverride ?? autoSeed ?? parseCenter(centerLat, centerLng) ?? getBounds(boundary).center;
     const size = estimateWidthHeight(boundary);
+    setAutoSeed(center);
+    setAutoResult(null);
     setSegmenting(true);
     try {
       const result = await detectFieldBoundary({
         latitude: center.latitude,
         longitude: center.longitude,
-        radiusMeters: Math.max(size.widthM, size.heightM) * 0.75,
+        radiusMeters: Math.max(Math.max(size.widthM, size.heightM) * 1.15, 500),
       });
       const nextBoundary = normalizeBoundary(result.boundary);
       setBoundary(nextBoundary);
+      setAutoResult(result);
       syncMetaFromBoundary(nextBoundary);
-      mapRef.current?.animateToRegion(regionFromBoundary(nextBoundary), 300);
-      Alert.alert(
-        'Автоконтур построен',
-        `Sentinel-2 нашёл границу пашни. Уверенность: ${(result.confidence * 100).toFixed(0)}%. Проверьте углы перед сохранением.`,
-      );
+      setEditMode('corners');
+      setActiveCorner(null);
+      mapRef.current?.fitToCoordinates(nextBoundary, {
+        edgePadding: { top: 44, right: 36, bottom: 64, left: 36 },
+        animated: true,
+      });
     } catch (error) {
       Alert.alert(
         'Автоконтур недоступен',
@@ -201,6 +301,8 @@ export default function NewFieldScreen() {
       setCenterLng(formatCoord(nextCenter.longitude));
       const nextBoundary = buildRectangle(nextCenter, parseMeters(widthMeters) ?? DEFAULT_WIDTH_M, parseMeters(heightMeters) ?? DEFAULT_HEIGHT_M);
       setBoundary(nextBoundary);
+      setAutoSeed(nextCenter);
+      setAutoResult(null);
       mapRef.current?.animateToRegion(regionFromBoundary(nextBoundary), 400);
     } catch {
       Alert.alert('Ошибка GPS', 'Не удалось получить координаты.');
@@ -240,7 +342,7 @@ export default function NewFieldScreen() {
     return (
       <Screen contentStyle={styles.centered}>
         <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Загрузка участка…</Text>
+        <Text style={styles.loadingText}>Загрузка поля…</Text>
       </Screen>
     );
   }
@@ -249,8 +351,8 @@ export default function NewFieldScreen() {
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <Screen contentStyle={styles.content}>
         <View style={styles.titleBlock}>
-          <Text style={styles.title}>{isEditing ? 'Редактировать участок' : 'Новый участок'}</Text>
-          <Text style={styles.subtitle}>Двигайте углы на карте или вводите координаты и размеры вручную.</Text>
+          <Text style={styles.title}>{isEditing ? 'Редактировать поле' : 'Новое поле'}</Text>
+          <Text style={styles.subtitle}>Контур пашни можно распознать по снимку или уточнить вручную.</Text>
         </View>
 
         <Card style={styles.formCard}>
@@ -293,13 +395,27 @@ export default function NewFieldScreen() {
               Углы
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => {
+              setEditMode('auto');
+              setActiveCorner(null);
+              setMapType('satellite');
+            }}
+            style={[styles.modeTab, editMode === 'auto' && styles.modeTabActive]}
+          >
+            <Text style={[styles.modeTabText, editMode === 'auto' && styles.modeTabTextActive]} numberOfLines={1}>
+              Автоконтур
+            </Text>
+          </Pressable>
         </View>
         <Text style={styles.modeHint}>
           {editMode === 'move'
-            ? 'Тап по карте переносит весь контур в новую точку.'
+            ? 'Тап по карте перемещает всё поле целиком в новую точку.'
+            : editMode === 'auto'
+            ? 'Тапните внутри пашни. Спутник Sentinel-2 найдёт контур поля автоматически.'
             : activeCorner === null
-            ? 'Нажмите на пронумерованный маркер, затем на карту — угол переместится туда. Либо перетащите маркер.'
-            : `Угол ${activeCorner + 1} выбран — нажмите на карту, куда его перенести.`}
+            ? 'Тапните по номеру угла, чтобы выбрать его, или по карте, чтобы добавить вершину.'
+            : `Угол ${activeCorner + 1} выбран: перетащите его или тапните на карте в новое место.`}
         </Text>
 
         <View style={styles.mapFrame}>
@@ -313,35 +429,74 @@ export default function NewFieldScreen() {
               style={styles.map}
               initialRegion={mapRegion}
               onPress={handleMapPress}
+              mapType={mapType}
               showsUserLocation
               showsMyLocationButton={false}
             >
               <Polygon coordinates={boundary} fillColor="rgba(27, 94, 32, 0.16)" strokeColor={colors.primary} strokeWidth={2} />
-              {boundary.map((point, index) => (
-                <Marker
-                  key={`corner-${index}`}
-                  coordinate={point}
-                  draggable={editMode === 'corners'}
-                  hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
-                  tracksViewChanges
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    if (editMode === 'corners') setActiveCorner(index);
-                  }}
-                  onDragStart={() => setActiveCorner(index)}
-                  onDragEnd={(event) => {
-                    updateCorner(index, event.nativeEvent.coordinate);
-                  }}
-                >
-                  <View style={styles.cornerMarker}>
-                    <View style={[styles.cornerMarkerInner, activeCorner === index && styles.cornerMarkerInnerActive]}>
-                      <Text style={styles.cornerMarkerText}>{index + 1}</Text>
+              {boundary.map((point, index) => {
+                const isActive = activeCorner === index;
+                return (
+                  <Marker
+                    key={`corner-${index}`}
+                    coordinate={point}
+                    draggable={editMode === 'corners'}
+                    hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+                    tracksViewChanges
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    onPress={(event) => {
+                      event.stopPropagation();
+                      markerPressHandledRef.current = true;
+                      setTimeout(() => {
+                        markerPressHandledRef.current = false;
+                      }, 400);
+                      if (editMode === 'corners') {
+                        setActiveCorner((curr) => (curr === index ? null : index));
+                      }
+                    }}
+                    onDragStart={() => {
+                      markerPressHandledRef.current = true;
+                      setActiveCorner(index);
+                    }}
+                    onDragEnd={(event) => {
+                      markerPressHandledRef.current = true;
+                      setTimeout(() => {
+                        markerPressHandledRef.current = false;
+                      }, 400);
+                      updateCorner(index, event.nativeEvent.coordinate);
+                    }}
+                  >
+                    <View style={styles.cornerMarker}>
+                      <View style={[styles.cornerMarkerInner, isActive && styles.cornerMarkerInnerActive]}>
+                        <Text style={styles.cornerMarkerText}>{index + 1}</Text>
+                      </View>
                     </View>
+                  </Marker>
+                );
+              })}
+              {editMode === 'auto' && (
+                <Marker coordinate={autoSeed} anchor={{ x: 0.5, y: 0.5 }}>
+                  <View style={styles.seedMarker}>
+                    <View style={styles.seedMarkerCore} />
                   </View>
                 </Marker>
-              ))}
+              )}
             </MapView>
+          )}
+
+          {Platform.OS !== 'web' && (
+            <Pressable
+              onPress={() => setMapType((current) => (current === 'standard' ? 'satellite' : 'standard'))}
+              style={({ pressed }) => [styles.mapTypeButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.mapTypeButtonText}>{mapType === 'standard' ? 'Спутник' : 'Схема'}</Text>
+            </Pressable>
+          )}
+          {segmenting && (
+            <View style={styles.segmentOverlay} pointerEvents="none">
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.segmentOverlayText}>Анализируем снимок и границы поля…</Text>
+            </View>
           )}
           <View style={styles.mapInfo}>
             <Text style={styles.mapInfoText} numberOfLines={2}>
@@ -350,26 +505,96 @@ export default function NewFieldScreen() {
           </View>
         </View>
 
+        {activeCorner !== null && (
+          <View style={styles.selectedCornerBanner}>
+            <View style={styles.selectedCornerInfo}>
+              <View style={styles.selectedCornerBadge}>
+                <Text style={styles.selectedCornerBadgeText}>{activeCorner + 1}</Text>
+              </View>
+              <View style={styles.selectedCornerTexts}>
+                <Text style={styles.selectedCornerTitle}>Угол {activeCorner + 1} выбран</Text>
+                <Text style={styles.selectedCornerSub}>Перетащите метку или тапните на карте</Text>
+              </View>
+            </View>
+            <View style={styles.selectedCornerActions}>
+              {boundary.length > 3 && (
+                <Pressable onPress={removeActiveCorner} style={({ pressed }) => [styles.bannerDeleteBtn, pressed && styles.pressed]}>
+                  <Text style={styles.bannerDeleteBtnText}>🗑 Удалить</Text>
+                </Pressable>
+              )}
+              <Pressable onPress={() => setActiveCorner(null)} style={({ pressed }) => [styles.bannerCancelBtn, pressed && styles.pressed]}>
+                <Text style={styles.bannerCancelBtnText}>✕ Снять</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+
         <View style={styles.actionsRow}>
+          {editMode === 'corners' && (
+            <Pressable onPress={addCornerAtMidpoint} style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
+              <Text style={styles.secondaryButtonText}>+ Добавить точку</Text>
+            </Pressable>
+          )}
+          {editMode === 'corners' && boundary.length > 3 && (
+            <Pressable
+              onPress={() => {
+                if (activeCorner !== null) {
+                  removeActiveCorner();
+                } else {
+                  removeCornerByIndex(boundary.length - 1);
+                }
+              }}
+              style={({ pressed }) => [styles.dangerButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.dangerButtonText}>
+                {activeCorner !== null ? `Удалить угол ${activeCorner + 1}` : 'Удалить посл. угол'}
+              </Text>
+            </Pressable>
+          )}
           <Pressable onPress={centerContour} style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-            <Text style={styles.secondaryButtonText}>Центрировать контур</Text>
-          </Pressable>
-          <Pressable onPress={alignToRectangle} style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-            <Text style={styles.secondaryButtonText}>Выровнять в прямоугольник</Text>
+            <Text style={styles.secondaryButtonText}>Центрировать</Text>
           </Pressable>
         </View>
 
         <Pressable
           disabled={segmenting}
-          onPress={() => void autoBoundaryFromSatellite()}
+          onPress={() => {
+            if (editMode !== 'auto') {
+              setEditMode('auto');
+              setActiveCorner(null);
+              setMapType('satellite');
+            }
+            void autoBoundaryFromSatellite();
+          }}
           style={({ pressed }) => [styles.segmentButton, (pressed || segmenting) && styles.pressed]}
         >
           {segmenting ? (
             <ActivityIndicator size="small" color={colors.primary} />
           ) : (
-            <Text style={styles.segmentButtonText}>Автоконтур по снимку Sentinel-2</Text>
+            <Text style={styles.segmentButtonText}>
+              🛰 Распознать контур поля со спутника
+            </Text>
           )}
         </Pressable>
+
+        {autoResult && (
+          <View style={[styles.autoStatus, autoResult.needsReview && styles.autoStatusReview]}>
+            <View style={styles.autoStatusHeader}>
+              <Text style={[styles.autoStatusTitle, autoResult.needsReview && styles.autoStatusTitleReview]}>
+                {autoResult.needsReview ? 'Контур требует проверки' : 'Пашня распознана'}
+              </Text>
+              <Text style={[styles.autoStatusConfidence, autoResult.needsReview && styles.autoStatusConfidenceReview]}>
+                {Math.round(autoResult.confidence * 100)}%
+              </Text>
+            </View>
+            <Text style={styles.autoStatusText}>
+              {autoResult.pointCount} вершин · {autoResult.estimatedAreaHa.toFixed(1)} га · качество формы {Math.round(autoResult.compactness * 100)}%
+            </Text>
+            <Text style={styles.autoStatusText}>NDVI в точке {autoResult.seedNdvi.toFixed(2)} · покрытие окна {autoResult.coveragePercent.toFixed(1)}%</Text>
+            {autoResult.warning ? <Text style={styles.autoStatusWarning}>{autoResult.warning}</Text> : null}
+            <Text style={styles.autoStatusSource}>Sentinel-2 · {autoResult.spatialResolutionMeters} м/пикс · окно {autoResult.analysisWindowDays} дней</Text>
+          </View>
+        )}
 
         <Card style={styles.formCard}>
           <View style={styles.twoCols}>
@@ -393,32 +618,83 @@ export default function NewFieldScreen() {
         </View>
 
         <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>КООРДИНАТЫ УГЛОВ</Text>
+          <Text style={styles.sectionTitle}>КООРДИНАТЫ УГЛОВ ({boundary.length})</Text>
+          <Pressable onPress={addCornerAtMidpoint} style={({ pressed }) => [styles.headerAddBtn, pressed && styles.pressed]}>
+            <Text style={styles.headerAddBtnText}>+ Добавить угол</Text>
+          </Pressable>
         </View>
 
         <Card style={styles.formCard}>
-          {boundary.map((point, index) => (
-            <View key={`corner-row-${index}`}>
-              <View style={styles.cornerRow}>
-                <Text style={styles.cornerLabel}>Угол {index + 1}</Text>
-                <View style={styles.cornerInputs}>
-                  <TextInput
-                    value={formatCoord(point.latitude)}
-                    onChangeText={(value) => updateCornerText(index, 'latitude', value)}
-                    keyboardType="decimal-pad"
-                    style={styles.cornerInput}
-                  />
-                  <TextInput
-                    value={formatCoord(point.longitude)}
-                    onChangeText={(value) => updateCornerText(index, 'longitude', value)}
-                    keyboardType="decimal-pad"
-                    style={styles.cornerInput}
-                  />
+          {boundary.map((point, index) => {
+            const isSelected = activeCorner === index;
+            return (
+              <View key={`corner-row-${index}`}>
+                <View style={[styles.cornerRow, isSelected && styles.cornerRowActive]}>
+                  <View style={styles.cornerRowTop}>
+                    <Pressable
+                      onPress={() => {
+                        setActiveCorner(isSelected ? null : index);
+                        mapRef.current?.animateToRegion(
+                          {
+                            latitude: point.latitude,
+                            longitude: point.longitude,
+                            latitudeDelta: 0.005,
+                            longitudeDelta: 0.005,
+                          },
+                          250
+                        );
+                      }}
+                      style={styles.cornerHeaderPressable}
+                    >
+                      <View style={[styles.cornerNumberBadge, isSelected && styles.cornerNumberBadgeActive]}>
+                        <Text style={[styles.cornerNumberText, isSelected && styles.cornerNumberTextActive]}>
+                          {index + 1}
+                        </Text>
+                      </View>
+                      <Text style={[styles.cornerLabel, isSelected && styles.cornerLabelActive]}>
+                        Угол {index + 1} {isSelected ? '(выбран на карте)' : ''}
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      disabled={boundary.length <= 3}
+                      onPress={() => removeCornerByIndex(index)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      style={({ pressed }) => [
+                        styles.cornerDeleteBtn,
+                        boundary.length <= 3 && styles.cornerDeleteBtnDisabled,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={[styles.cornerDeleteBtnText, boundary.length <= 3 && styles.cornerDeleteBtnTextDisabled]}>
+                        Удалить
+                      </Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.cornerInputs}>
+                    <TextInput
+                      value={formatCoord(point.latitude)}
+                      onChangeText={(value) => updateCornerText(index, 'latitude', value)}
+                      keyboardType="decimal-pad"
+                      style={[styles.cornerInput, isSelected && styles.cornerInputActive]}
+                      placeholder="Широта (lat)"
+                      placeholderTextColor={colors.muted}
+                    />
+                    <TextInput
+                      value={formatCoord(point.longitude)}
+                      onChangeText={(value) => updateCornerText(index, 'longitude', value)}
+                      keyboardType="decimal-pad"
+                      style={[styles.cornerInput, isSelected && styles.cornerInputActive]}
+                      placeholder="Долгота (lng)"
+                      placeholderTextColor={colors.muted}
+                    />
+                  </View>
                 </View>
+                {index < boundary.length - 1 && <View style={styles.divider} />}
               </View>
-              {index < boundary.length - 1 && <View style={styles.divider} />}
-            </View>
-          ))}
+            );
+          })}
         </Card>
 
         <Pressable disabled={saving} onPress={() => void save()} style={({ pressed }) => [styles.primaryButton, (pressed || saving) && styles.pressed]}>
@@ -463,7 +739,13 @@ function buildRectangle(center: Coordinate, widthM: number, heightM: number): Co
 }
 
 function normalizeBoundary(points: Coordinate[]): Coordinate[] {
-  if (points.length >= 4) return points.slice(0, 4);
+  const valid = points.filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude));
+  if (valid.length >= 3) {
+    const first = valid[0];
+    const last = valid[valid.length - 1];
+    const closesRing = first.latitude === last.latitude && first.longitude === last.longitude;
+    return closesRing ? valid.slice(0, -1) : valid;
+  }
   return buildRectangle(DEFAULT_CENTER, DEFAULT_WIDTH_M, DEFAULT_HEIGHT_M);
 }
 
@@ -532,6 +814,20 @@ function distanceKm(a: Coordinate, b: Coordinate): number {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * earthRadiusKm * Math.asin(Math.sqrt(h));
 }
+
+function distanceToSegment(p: Coordinate, a: Coordinate, b: Coordinate): number {
+  const dx = b.longitude - a.longitude;
+  const dy = b.latitude - a.latitude;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq === 0) {
+    return Math.hypot(p.longitude - a.longitude, p.latitude - a.latitude);
+  }
+  const t = Math.max(0, Math.min(1, ((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) / lengthSq));
+  const projX = a.longitude + t * dx;
+  const projY = a.latitude + t * dy;
+  return Math.hypot(p.longitude - projX, p.latitude - projY);
+}
+
 
 function formatCoord(value: number) {
   return value.toFixed(6);
@@ -607,12 +903,30 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   cornerMarkerInnerActive: {
-    backgroundColor: colors.danger,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    backgroundColor: '#F59E0B',
+    borderColor: '#FEF3C7',
+    borderWidth: 3,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    shadowColor: '#F59E0B',
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+    elevation: 6,
   },
+
   cornerMarkerText: { fontFamily: fontFamilies.bold, fontSize: 12, color: '#FFFFFF' },
+  seedMarker: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    backgroundColor: 'rgba(217,119,6,0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  seedMarkerCore: { width: 12, height: 12, borderRadius: 6, backgroundColor: colors.warning },
   mapFrame: {
     height: 300,
     borderRadius: 10,
@@ -636,6 +950,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   mapInfoText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.text, textAlign: 'center' },
+  mapTypeButton: {
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: 'rgba(28,28,30,0.78)',
+    justifyContent: 'center',
+  },
+  mapTypeButtonText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: '#FFFFFF' },
+  segmentOverlay: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    top: 52,
+    minHeight: 48,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  segmentOverlayText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.text },
   twoCols: { flexDirection: 'row' },
   actionsRow: { flexDirection: 'row', gap: 10 },
   secondaryButton: {
@@ -650,6 +990,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   secondaryButtonText: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.primary, textAlign: 'center' },
+  dangerButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    backgroundColor: '#FEF2F2',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  dangerButtonText: { fontFamily: fontFamilies.semiBold, fontSize: 12.5, color: '#DC2626', textAlign: 'center' },
+
   segmentButton: {
     minHeight: 44,
     borderRadius: 10,
@@ -661,10 +1013,179 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   segmentButtonText: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.primaryDark, textAlign: 'center' },
-  sectionHeaderRow: { paddingHorizontal: 4 },
+  autoStatus: {
+    borderRadius: 10,
+    backgroundColor: colors.successSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 3,
+  },
+  autoStatusReview: { backgroundColor: colors.warningSoft },
+  autoStatusHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  autoStatusTitle: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.primaryDark },
+  autoStatusTitleReview: { color: '#78350F' },
+  autoStatusConfidence: { fontFamily: fontFamilies.bold, fontSize: 13, color: colors.primary },
+  autoStatusConfidenceReview: { color: colors.warning },
+  autoStatusText: { fontFamily: fontFamilies.medium, fontSize: 12, lineHeight: 17, color: colors.text },
+  autoStatusWarning: { fontFamily: fontFamilies.medium, fontSize: 12, lineHeight: 17, color: '#78350F' },
+  autoStatusSource: { fontFamily: fontFamilies.regular, fontSize: 11, lineHeight: 15, color: colors.textSecondary },
+  sectionHeaderRow: {
+    paddingHorizontal: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   sectionTitle: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.textSecondary },
+  headerAddBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: colors.primarySoft,
+  },
+  headerAddBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12,
+    color: colors.primaryDark,
+  },
+  selectedCornerBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    gap: 8,
+  },
+  selectedCornerInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  selectedCornerBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#F59E0B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectedCornerBadgeText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 12,
+    color: '#FFFFFF',
+  },
+  selectedCornerTexts: {
+    flex: 1,
+  },
+  selectedCornerTitle: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12.5,
+    color: '#92400E',
+  },
+  selectedCornerSub: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 10.5,
+    color: '#B45309',
+  },
+  selectedCornerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  bannerDeleteBtn: {
+    minHeight: 32,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: '#FEE2E2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bannerDeleteBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    color: '#DC2626',
+  },
+  bannerCancelBtn: {
+    minHeight: 32,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bannerCancelBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    color: colors.textSecondary,
+  },
   cornerRow: { paddingHorizontal: 12, paddingVertical: 10, gap: 8 },
+  cornerRowActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+  },
+  cornerRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  cornerHeaderPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  cornerNumberBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cornerNumberBadgeActive: {
+    backgroundColor: '#F59E0B',
+    borderColor: '#F59E0B',
+  },
+  cornerNumberText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  cornerNumberTextActive: {
+    color: '#FFFFFF',
+  },
   cornerLabel: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.text },
+  cornerLabelActive: {
+    color: '#92400E',
+    fontFamily: fontFamilies.bold,
+  },
+  cornerDeleteBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: '#FEE2E2',
+  },
+  cornerDeleteBtnDisabled: {
+    backgroundColor: colors.surfaceSecondary,
+    opacity: 0.4,
+  },
+  cornerDeleteBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    color: '#DC2626',
+  },
+  cornerDeleteBtnTextDisabled: {
+    color: colors.muted,
+  },
   cornerInputs: { flexDirection: 'row', gap: 8 },
   cornerInput: {
     flex: 1,
@@ -676,6 +1197,11 @@ const styles = StyleSheet.create({
     fontFamily: fontFamilies.medium,
     fontSize: 12.5,
     color: colors.text,
+  },
+  cornerInputActive: {
+    borderColor: '#F59E0B',
+    borderWidth: 1,
+    backgroundColor: '#FFFBEB',
   },
   primaryButton: { minHeight: 50, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   primaryButtonText: { fontFamily: fontFamilies.semiBold, fontSize: 15, color: '#FFFFFF' },

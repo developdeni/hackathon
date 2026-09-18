@@ -37,6 +37,7 @@ import {
   LandUseClassification,
   RiskZone,
   SatelliteData,
+  SatelliteObservation,
   ZonesData,
 } from '../../src/types/domain';
 
@@ -184,6 +185,76 @@ const arStyles = StyleSheet.create({
   textDestructive: { color: colors.danger },
   chevron: { fontFamily: fontFamilies.regular, fontSize: 20, color: colors.muted },
   chevronDestructive: { color: '#F4B4B4' },
+});
+
+function IndexHistory({ observations }: { observations: SatelliteObservation[] }) {
+  const recent = observations.slice(-6).reverse();
+  return (
+    <Card style={historyStyles.card}>
+      <View style={historyStyles.legendRow}>
+        <View style={historyStyles.legendItem}>
+          <View style={[historyStyles.legendDot, { backgroundColor: colors.primary }]} />
+          <Text style={historyStyles.legendText}>NDVI</Text>
+        </View>
+        <View style={historyStyles.legendItem}>
+          <View style={[historyStyles.legendDot, { backgroundColor: colors.info }]} />
+          <Text style={historyStyles.legendText}>NDMI</Text>
+        </View>
+        <Text style={historyStyles.legendNote}>последние {Math.min(observations.length, 18)}</Text>
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={historyStyles.chartContent}>
+        {observations.slice(-18).map((item, index) => {
+          const ndviHeight = Math.max(4, Math.min(76, ((item.ndviMean + 0.35) / 1.35) * 76));
+          const ndmiHeight = item.ndmiMean == null ? 0 : Math.max(4, Math.min(76, ((item.ndmiMean + 0.55) / 1.35) * 76));
+          return (
+            <View key={`${item.date}-${index}`} style={historyStyles.chartColumn}>
+              <View style={historyStyles.barArea}>
+                <View style={[historyStyles.bar, { height: ndviHeight, backgroundColor: colors.primary }]} />
+                {item.ndmiMean != null && <View style={[historyStyles.bar, { height: ndmiHeight, backgroundColor: colors.info }]} />}
+              </View>
+              <Text style={historyStyles.dateLabel}>{item.date.slice(5).replace('-', '.')}</Text>
+            </View>
+          );
+        })}
+      </ScrollView>
+
+      <View style={historyStyles.tableHeader}>
+        <Text style={[historyStyles.headerCell, historyStyles.dateCell]}>Дата</Text>
+        <Text style={historyStyles.headerCell}>NDVI</Text>
+        <Text style={historyStyles.headerCell}>NDMI</Text>
+        <Text style={historyStyles.headerCell}>Облака</Text>
+      </View>
+      {recent.map((item, index) => (
+        <View key={`row-${item.date}-${index}`} style={[historyStyles.tableRow, index > 0 && historyStyles.tableDivider]}>
+          <Text style={[historyStyles.valueCell, historyStyles.dateCell]}>{item.date}</Text>
+          <Text style={historyStyles.valueCell}>{item.ndviMean.toFixed(2)}</Text>
+          <Text style={historyStyles.valueCell}>{item.ndmiMean == null ? '—' : item.ndmiMean.toFixed(2)}</Text>
+          <Text style={historyStyles.valueCell}>{item.cloudCoveragePercent.toFixed(0)}%</Text>
+        </View>
+      ))}
+    </Card>
+  );
+}
+
+const historyStyles = StyleSheet.create({
+  card: { padding: 0, overflow: 'hidden' },
+  legendRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.text },
+  legendNote: { marginLeft: 'auto', fontFamily: fontFamilies.regular, fontSize: 11, color: colors.textSecondary },
+  chartContent: { minHeight: 116, paddingHorizontal: 12, paddingBottom: 8, gap: 7 },
+  chartColumn: { width: 29, alignItems: 'center', justifyContent: 'flex-end', gap: 5 },
+  barArea: { height: 80, flexDirection: 'row', alignItems: 'flex-end', gap: 2 },
+  bar: { width: 8, borderTopLeftRadius: 2, borderTopRightRadius: 2 },
+  dateLabel: { fontFamily: fontFamilies.medium, fontSize: 9.5, color: colors.muted },
+  tableHeader: { flexDirection: 'row', backgroundColor: colors.surfaceSecondary, paddingHorizontal: 14, paddingVertical: 7 },
+  tableRow: { flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8 },
+  tableDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  headerCell: { flex: 1, textAlign: 'right', fontFamily: fontFamilies.semiBold, fontSize: 10.5, color: colors.textSecondary },
+  valueCell: { flex: 1, textAlign: 'right', fontFamily: fontFamilies.medium, fontSize: 11.5, color: colors.text },
+  dateCell: { flex: 1.45, textAlign: 'left' },
 });
 
 // ---------------------------------------------------------------------------
@@ -424,6 +495,26 @@ export default function FieldScreen() {
           </View>
         )}
       </Card>
+
+      {satellite?.status === 'ready' && satellite.observations.length > 0 && (
+        <>
+          <SectionLabel
+            title="СЕЗОННАЯ ДИНАМИКА"
+            right={`${satellite.observationCount ?? satellite.observations.length} наблюдений`}
+          />
+          <IndexHistory observations={satellite.observations} />
+          <Card style={styles.dataSourceCard}>
+            <InfoRow
+              label="Период анализа"
+              value={`${satellite.periodStart ?? satellite.observations[0].date} — ${satellite.periodEnd ?? latestObs?.date}`}
+            />
+            <View style={styles.hairline} />
+            <InfoRow label="Пространственное разрешение" value={`${satellite.spatialResolutionMeters} м/пикс`} />
+            <View style={styles.hairline} />
+            <InfoRow label="Маска облаков" value={satellite.cloudMaskingMethod} />
+          </Card>
+        </>
+      )}
 
       {/* ── 3. WEATHER ─────────────────────────────────────────── */}
       {weather && (
@@ -846,6 +937,7 @@ const styles = StyleSheet.create({
   pendingText: { fontFamily: fontFamilies.regular, fontSize: 13, lineHeight: 18, color: colors.textSecondary },
   pendingZonesCard: { padding: 14, gap: 6 },
   pendingZonesTitle: { fontFamily: fontFamilies.semiBold, fontSize: 14, color: colors.text },
+  dataSourceCard: { paddingHorizontal: 14, paddingVertical: 0 },
 
   // Weather card
   weatherCard: { padding: 0, gap: 0, overflow: 'hidden' },

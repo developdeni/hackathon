@@ -72,7 +72,7 @@ class CreateFieldInput(BaseModel):
 class AutoBoundaryInput(BaseModel):
     latitude: float
     longitude: float
-    radiusMeters: float = PydanticField(default=700, ge=150, le=1800)
+    radiusMeters: float = PydanticField(default=700, ge=250, le=2500)
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +647,7 @@ async def detect_field_boundary(payload: AutoBoundaryInput, user_id: str = Depen
             payload.radiusMeters,
         )
     except RuntimeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/fields/{field_id}/export/geojson")
@@ -745,26 +745,56 @@ def list_inspections(field_id: str, request: Request, user_id: str = Depends(req
 async def create_inspection(
     field_id: str,
     request: Request,
-    note: str = Form(default=""),
-    latitude: float | None = Form(default=None),
-    longitude: float | None = Form(default=None),
-    photo: UploadFile | None = File(default=None),
     user_id: str = Depends(require_user),
 ) -> dict:
     with connect() as connection:
         _load_owned_field(connection, field_id, user_id)
-    if not note.strip() and photo is None:
+
+    content_type = request.headers.get("content-type", "")
+    photo_bytes: bytes | None = None
+    photo_suffix = ".jpg"
+
+    if "application/json" in content_type:
+        body = await request.json()
+        note = str(body.get("note") or "").strip()
+        lat_val = body.get("latitude")
+        lng_val = body.get("longitude")
+        latitude = float(lat_val) if lat_val is not None and str(lat_val).strip() else None
+        longitude = float(lng_val) if lng_val is not None and str(lng_val).strip() else None
+        b64 = body.get("photo_base64")
+        if b64:
+            import base64
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            try:
+                photo_bytes = base64.b64decode(b64)
+            except Exception:
+                photo_bytes = None
+            name = str(body.get("photo_name") or "photo.jpg")
+            photo_suffix = Path(name).suffix.lower() or ".jpg"
+    else:
+        form = await request.form()
+        note = str(form.get("note") or "").strip()
+        lat_val = form.get("latitude")
+        lng_val = form.get("longitude")
+        latitude = float(lat_val) if lat_val is not None and str(lat_val).strip() else None
+        longitude = float(lng_val) if lng_val is not None and str(lng_val).strip() else None
+        photo_field = form.get("photo")
+        if photo_field and hasattr(photo_field, "read"):
+            photo_bytes = await photo_field.read()
+            photo_suffix = Path(photo_field.filename or "photo.jpg").suffix.lower() or ".jpg"
+
+    if not note and photo_bytes is None:
         raise HTTPException(status_code=422, detail="Добавьте заметку или фотографию")
 
     inspection_id = f"inspection-{uuid4()}"
     photo_path: str | None = None
-    if photo is not None:
-        suffix = Path(photo.filename or "photo.jpg").suffix.lower() or ".jpg"
-        if suffix not in {".jpg", ".jpeg", ".png", ".heic", ".webp"}:
-            suffix = ".jpg"
-        filename = f"{inspection_id}{suffix}"
+    if photo_bytes:
+        if photo_suffix not in {".jpg", ".jpeg", ".png", ".heic", ".webp"}:
+            photo_suffix = ".jpg"
+        filename = f"{inspection_id}{photo_suffix}"
         destination = UPLOADS_DIR / filename
-        destination.write_bytes(await photo.read())
+        destination.write_bytes(photo_bytes)
         photo_path = f"/uploads/{filename}"
 
     created_at = datetime.now(timezone.utc).isoformat()
@@ -775,7 +805,7 @@ async def create_inspection(
             (id, field_id, created_at, note, photo_path, latitude, longitude, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'saved')
             """,
-            (inspection_id, field_id, created_at, note.strip(), photo_path, latitude, longitude),
+            (inspection_id, field_id, created_at, note, photo_path, latitude, longitude),
         )
         row = connection.execute(
             "SELECT * FROM inspections WHERE id = ?", (inspection_id,)

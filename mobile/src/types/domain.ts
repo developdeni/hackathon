@@ -114,6 +114,9 @@ export type SatelliteData = {
   spatialResolutionMeters: number;
   cloudMaskingMethod: string;
   updatedAt: string;
+  periodStart?: string;
+  periodEnd?: string;
+  observationCount?: number;
   observations: SatelliteObservation[];
 };
 
@@ -194,6 +197,15 @@ export type AutoBoundaryResult = {
   method: string;
   confidence: number;
   source: string;
+  spatialResolutionMeters: number;
+  analysisWindowDays: number;
+  seedNdvi: number;
+  coveragePercent: number;
+  estimatedAreaHa: number;
+  compactness: number;
+  pointCount: number;
+  needsReview: boolean;
+  warning?: string | null;
   boundary: Coordinate[];
 };
 

@@ -23,13 +23,14 @@ type CreateInspectionInput = {
   fieldId: string;
   note: string;
   photoUri: string | null;
+  photoBase64?: string | null;
   latitude: number | null;
   longitude: number | null;
 };
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 20_000): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     // Attach JWT token if available
     const token = await loadToken();
@@ -61,7 +62,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     return await response.json() as T;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Сервер не ответил за 10 секунд');
+      throw new Error(`Сервер не ответил за ${Math.round(timeoutMs / 1000)} секунд`);
     }
     throw error;
   } finally {
@@ -171,24 +172,61 @@ export function getInspection(id: string) {
   return apiFetch<Inspection>(`/api/inspections/${encodeURIComponent(id)}`);
 }
 
-export function createInspection(input: CreateInspectionInput) {
-  const form = new FormData();
-  form.append('note', input.note);
-  if (input.latitude !== null) form.append('latitude', String(input.latitude));
-  if (input.longitude !== null) form.append('longitude', String(input.longitude));
-  if (input.photoUri) {
-    const extension = input.photoUri.split('.').pop()?.toLowerCase() ?? 'jpg';
-    const mimeType = extension === 'png' ? 'image/png' : extension === 'heic' ? 'image/heic' : 'image/jpeg';
-    form.append('photo', {
-      uri: input.photoUri,
-      name: `inspection.${extension}`,
-      type: mimeType,
-    } as unknown as Blob);
+export async function createInspection(input: CreateInspectionInput) {
+  const extension = input.photoUri?.split('.').pop()?.toLowerCase() ?? 'jpg';
+  const fileName = `inspection.${extension}`;
+
+  // If base64 is already provided or if no photo attached, send clean JSON
+  if (input.photoBase64 || !input.photoUri) {
+    return apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        note: input.note,
+        latitude: input.latitude,
+        longitude: input.longitude,
+        photo_base64: input.photoBase64 ?? null,
+        photo_name: fileName,
+      }),
+    });
   }
-  return apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
-    method: 'POST',
-    body: form,
-  });
+
+  // If photoUri is present without base64, convert to Blob or read as data URL
+  try {
+    const res = await fetch(input.photoUri);
+    const blob = await res.blob();
+    const form = new FormData();
+    form.append('note', input.note);
+    if (input.latitude !== null) form.append('latitude', String(input.latitude));
+    if (input.longitude !== null) form.append('longitude', String(input.longitude));
+    form.append('photo', blob, fileName);
+
+    return await apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
+      method: 'POST',
+      body: form,
+    });
+  } catch {
+    const res = await fetch(input.photoUri);
+    const blob = await res.blob();
+    const base64Data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+
+    return apiFetch<Inspection>(`/api/fields/${encodeURIComponent(input.fieldId)}/inspections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        note: input.note,
+        latitude: input.latitude,
+        longitude: input.longitude,
+        photo_base64: base64Data,
+        photo_name: fileName,
+      }),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +254,7 @@ export function detectFieldBoundary(input: { latitude: number; longitude: number
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
-  });
+  }, 35_000);
 }
 
 export async function buildAuthorizedDownloadUrl(path: string) {
