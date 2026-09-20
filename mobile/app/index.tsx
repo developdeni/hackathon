@@ -2122,11 +2122,11 @@ function AiToolsView({
           <View style={styles.aiChatHeaderAvatar}>
             <Text style={{ fontSize: 20 }}>🌱</Text>
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.aiChatHeaderTitle}>AI Агроном</Text>
+          <View style={styles.aiChatHeaderTextWrap}>
+            <Text style={styles.aiChatHeaderTitle} numberOfLines={1}>AI Агроном</Text>
             <View style={styles.aiChatHeaderStatusRow}>
               <View style={styles.aiChatHeaderDot} />
-              <Text style={styles.aiChatHeaderStatus}>На связи · отвечает за секунды</Text>
+              <Text style={styles.aiChatHeaderStatus} numberOfLines={1}>На связи</Text>
             </View>
           </View>
         </View>
@@ -2134,7 +2134,7 @@ function AiToolsView({
           <Pressable
             onPress={handleClearHistory}
             style={({ pressed }) => [styles.aiChatHeaderBtn, pressed && styles.pressed]}
-            hitSlop={8}
+            hitSlop={10}
           >
             <SymbolView name="trash" size={16} tintColor={colors.muted} fallback={<Text>🗑️</Text>} />
           </Pressable>
@@ -3807,22 +3807,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     backgroundColor: colors.surface,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
+    gap: 8,
   },
   aiChatHeaderLeft: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   aiChatHeaderAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: '#E8F5E9',
     alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  aiChatHeaderTextWrap: {
+    flex: 1,
+    minWidth: 0,
     justifyContent: 'center',
   },
   aiChatHeaderTitle: {
@@ -3840,6 +3849,7 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: '#2E7D32',
+    flexShrink: 0,
   },
   aiChatHeaderStatus: {
     fontFamily: fontFamilies.medium,
@@ -3858,6 +3868,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
 
   /* Target field banner */
