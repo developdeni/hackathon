@@ -1,12 +1,19 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   AgroWeather,
+  ClimateRiskForecast,
+  AiChatMessage,
   AiDiagnosisResult,
+  AiGrainQualityResult,
+  AiLivestockResult,
+  AiStandCountResult,
   AutoBoundaryResult,
   AuthResponse,
   CreateFieldInput,
   CreateProfileInput,
   FarmProfile,
   Field,
+  FieldOperationsRecommendation,
   Inspection,
   LandUseClassification,
   LoginInput,
@@ -14,6 +21,9 @@ import {
   SatelliteData,
   ServerHealth,
   User,
+  YieldForecast,
+  YieldHistoryRecord,
+  YieldHistorySource,
   ZonesData,
 } from '../types/domain';
 import { loadToken } from './auth';
@@ -28,7 +38,21 @@ import {
   saveLocalCache,
 } from './offline';
 
-export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.8.100:8000';
+export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://MacBook-Air-deni.local:8000';
+
+export class ApiRequestError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+  }
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return error instanceof ApiRequestError && (error.status === 401 || error.status === 403);
+}
 
 type CreateInspectionInput = {
   fieldId: string;
@@ -84,7 +108,7 @@ async function apiFetch<T>(
       } catch {
         // Response was not JSON
       }
-      throw new Error(message);
+      throw new ApiRequestError(message, response.status);
     }
 
     if (response.status === 204) {
@@ -93,7 +117,7 @@ async function apiFetch<T>(
 
     return (await response.json()) as T;
   } catch (error) {
-    if (retries > 0) {
+    if (retries > 0 && !(error instanceof ApiRequestError)) {
       await new Promise((res) => setTimeout(res, 800));
       return apiFetch<T>(path, init, timeoutMs, retries - 1);
     }
@@ -105,7 +129,6 @@ async function apiFetch<T>(
     clearTimeout(timeout);
   }
 }
-
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -148,10 +171,14 @@ export const CACHE_KEYS = {
   FIELD: (id: string) => `field_${id}`,
   INSPECTIONS: (fieldId: string) => `inspections_${fieldId}`,
   INSPECTION: (id: string) => `inspection_${id}`,
-  SATELLITE: (fieldId: string) => `sat_${fieldId}`,
-  ZONES: (fieldId: string) => `zones_${fieldId}`,
-  WEATHER: (fieldId: string) => `weather_${fieldId}`,
-  CLASSIFICATION: (fieldId: string) => `class_${fieldId}`,
+  SATELLITE: (fieldId: string) => `sat_v2_${fieldId}`,
+  ZONES: (fieldId: string) => `zones_v2_${fieldId}`,
+  WEATHER: (fieldId: string) => `weather_v2_${fieldId}`,
+  CLASSIFICATION: (fieldId: string) => `class_v2_${fieldId}`,
+  CLIMATE_RISK: (fieldId: string) => `climaterisk_v2_${fieldId}`,
+  YIELD_FORECAST: (fieldId: string) => `yieldforecast_v1_${fieldId}`,
+  YIELD_HISTORY: (fieldId: string) => `yieldhistory_v1_${fieldId}`,
+  OPERATIONS: (fieldId: string) => `operations_v1_${fieldId}`,
 };
 
 export async function listProfiles(): Promise<FarmProfile[]> {
@@ -363,7 +390,7 @@ export async function getFieldSatellite(fieldId: string): Promise<SatelliteData>
     return data;
   } catch (err) {
     const cached = await getLocalCache<SatelliteData>(cacheKey);
-    if (cached) return cached;
+    if (cached) return { ...cached, stale: true };
     throw err;
   }
 }
@@ -371,12 +398,12 @@ export async function getFieldSatellite(fieldId: string): Promise<SatelliteData>
 export async function getFieldZones(fieldId: string): Promise<ZonesData> {
   const cacheKey = CACHE_KEYS.ZONES(fieldId);
   try {
-    const data = await apiFetch<ZonesData>(`/api/fields/${encodeURIComponent(fieldId)}/zones`);
+    const data = await apiFetch<ZonesData>(`/api/fields/${encodeURIComponent(fieldId)}/zones`, undefined, 70_000, 0);
     void saveLocalCache(cacheKey, data);
     return data;
   } catch (err) {
     const cached = await getLocalCache<ZonesData>(cacheKey);
-    if (cached) return cached;
+    if (cached) return { ...cached, stale: true };
     throw err;
   }
 }
@@ -389,7 +416,7 @@ export async function getFieldWeather(fieldId: string): Promise<AgroWeather> {
     return data;
   } catch (err) {
     const cached = await getLocalCache<AgroWeather>(cacheKey);
-    if (cached) return cached;
+    if (cached) return { ...cached, status: 'cached', message: `Сохранённый прогноз от ${cached.updatedAt ?? 'неизвестной даты'}. Обновление недоступно.` };
     throw err;
   }
 }
@@ -405,6 +432,86 @@ export async function getFieldClassification(fieldId: string): Promise<LandUseCl
     if (cached) return cached;
     throw err;
   }
+}
+
+export async function getFieldClimateRisk(fieldId: string): Promise<ClimateRiskForecast> {
+  const cacheKey = CACHE_KEYS.CLIMATE_RISK(fieldId);
+  try {
+    const data = await apiFetch<ClimateRiskForecast>(`/api/fields/${encodeURIComponent(fieldId)}/climate-risk`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<ClimateRiskForecast>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+export async function getFieldYieldForecast(fieldId: string): Promise<YieldForecast> {
+  const cacheKey = CACHE_KEYS.YIELD_FORECAST(fieldId);
+  try {
+    const data = await apiFetch<YieldForecast>(
+      `/api/fields/${encodeURIComponent(fieldId)}/yield-forecast`,
+      undefined,
+      90_000,
+      0
+    );
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<YieldForecast>(cacheKey);
+    if (cached) return { ...cached, stale: true };
+    throw err;
+  }
+}
+
+export async function getFieldOperationsRecommendation(fieldId: string): Promise<FieldOperationsRecommendation> {
+  const cacheKey = CACHE_KEYS.OPERATIONS(fieldId);
+  try {
+    const data = await apiFetch<FieldOperationsRecommendation>(
+      `/api/fields/${encodeURIComponent(fieldId)}/operations-recommendation`,
+      undefined,
+      35_000,
+      0
+    );
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<FieldOperationsRecommendation>(cacheKey);
+    if (cached) return { ...cached, stale: true };
+    throw err;
+  }
+}
+
+export async function listYieldHistory(fieldId: string): Promise<YieldHistoryRecord[]> {
+  const cacheKey = CACHE_KEYS.YIELD_HISTORY(fieldId);
+  try {
+    const data = await apiFetch<YieldHistoryRecord[]>(`/api/fields/${encodeURIComponent(fieldId)}/yield-history`);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<YieldHistoryRecord[]>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+export function createYieldHistory(
+  fieldId: string,
+  input: { seasonYear: number; cropType?: string; yieldTPerHa: number; source: YieldHistorySource; notes: string }
+) {
+  return apiFetch<YieldHistoryRecord>(`/api/fields/${encodeURIComponent(fieldId)}/yield-history`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteYieldHistory(fieldId: string, recordId: string) {
+  return apiFetch<void>(
+    `/api/fields/${encodeURIComponent(fieldId)}/yield-history/${encodeURIComponent(recordId)}`,
+    { method: 'DELETE' }
+  );
 }
 
 export function detectFieldBoundary(input: { latitude: number; longitude: number; radiusMeters: number }) {
@@ -427,25 +534,153 @@ export async function buildAuthorizedDownloadUrl(path: string) {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// AI Agronomic Advisor & Computer Vision (100% On-Device & Offline-First)
+// AI Agronomic Advisor & Vision Diagnostics (via Python Backend)
 // ---------------------------------------------------------------------------
 
-import {
-  analyzeLeafPhotoLocally,
-  generateLocalAiChatResponse,
-} from './localAiModel';
+const STORAGE_KEY_AI_CHAT = 'tanap_ai_chat_messages_v1';
 
 export async function diagnoseCropPhoto(
   photoBase64: string,
-  photoName = 'leaf.jpg'
+  photoName = 'photo.jpg'
 ): Promise<AiDiagnosisResult> {
-  // On-device neural vision inference directly in JS/Hermes (100% offline, zero network delay)
-  return analyzeLeafPhotoLocally(photoBase64, photoName);
+  const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
+  return apiFetch<AiDiagnosisResult>(
+    '/api/ai/diagnose-photo',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
+    },
+    35_000,
+    1 // retry once on failure
+  );
 }
 
-export async function askAiAgronomist(question: string): Promise<string> {
-  // On-device SLM reasoning directly in JS/Hermes (100% offline, zero network delay)
-  return generateLocalAiChatResponse(question);
+export async function countSeedlingsPhoto(
+  photoBase64: string,
+  photoName = 'field.jpg',
+  frameAreaM2?: number
+): Promise<AiStandCountResult> {
+  const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
+  return apiFetch<AiStandCountResult>(
+    '/api/ai/count-seedlings',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        photo_base64: cleanBase64,
+        photo_name: photoName,
+        frame_area_m2: frameAreaM2,
+      }),
+    },
+    35_000,
+    1 // retry once on failure
+  );
 }
 
+export async function countLivestock(
+  photoBase64: string,
+  photoName = 'herd.jpg'
+): Promise<AiLivestockResult> {
+  const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
+  return apiFetch<AiLivestockResult>(
+    '/api/ai/count-livestock',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
+    },
+    40_000,
+    1
+  );
+}
+
+export async function analyzeGrainQuality(
+  photoBase64: string,
+  photoName = 'grain.jpg'
+): Promise<AiGrainQualityResult> {
+  const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
+  return apiFetch<AiGrainQualityResult>(
+    '/api/ai/grain-quality',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
+    },
+    35_000,
+    1
+  );
+}
+
+export async function countSeedlingsVideoFrames(
+  frameBase64: string[],
+  videoName = 'field.mp4',
+  frameAreaM2?: number
+): Promise<AiStandCountResult> {
+  const frames = frameBase64.map((f) => (f.includes(',') ? f.split(',')[1] : f));
+  return apiFetch<AiStandCountResult>(
+    '/api/ai/count-seedlings',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_frames_base64: frames,
+        photo_name: videoName,
+        frame_area_m2: frameAreaM2,
+      }),
+    },
+    45_000,
+    0
+  );
+}
+
+export async function askAiAgronomist(
+  question: string,
+  history?: AiChatMessage[]
+): Promise<string> {
+  const historyPayload = history?.slice(-10).map((m) => ({
+    role: m.sender === 'user' ? 'user' : 'model',
+    text: m.text,
+  }));
+
+  const res = await apiFetch<{ question: string; answer: string }>(
+    '/api/ai/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, history: historyPayload }),
+    },
+    35_000,
+    1 // retry once on failure
+  );
+
+  return res.answer;
+}
+
+export async function loadAiChatHistory(): Promise<AiChatMessage[]> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY_AI_CHAT);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveAiChatHistory(messages: AiChatMessage[]): Promise<void> {
+  try {
+    const trimmed = messages.slice(-30);
+    await AsyncStorage.setItem(STORAGE_KEY_AI_CHAT, JSON.stringify(trimmed));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export async function clearAiChatHistory(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(STORAGE_KEY_AI_CHAT);
+  } catch {
+    // Ignore storage errors
+  }
+}

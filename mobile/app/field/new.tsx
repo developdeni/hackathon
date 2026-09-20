@@ -594,11 +594,11 @@ export default function NewFieldScreen() {
                 {autoResult.needsReview ? 'Контур требует проверки' : 'Пашня распознана'}
               </Text>
               <Text style={[styles.autoStatusConfidence, autoResult.needsReview && styles.autoStatusConfidenceReview]}>
-                {Math.round(autoResult.confidence * 100)}%
+                качество {Math.round(autoResult.qualityScore * 100)}/100
               </Text>
             </View>
             <Text style={styles.autoStatusText}>
-              {autoResult.pointCount} вершин · {autoResult.estimatedAreaHa.toFixed(1)} га · качество формы {Math.round(autoResult.compactness * 100)}%
+              {autoResult.pointCount} вершин · ≈ {autoResult.estimatedAreaHa.toFixed(1)} га · индекс компактности {autoResult.compactness.toFixed(2)}
             </Text>
             <Text style={styles.autoStatusText}>NDVI в точке {autoResult.seedNdvi.toFixed(2)} · покрытие окна {autoResult.coveragePercent.toFixed(1)}%</Text>
             {autoResult.warning ? <Text style={styles.autoStatusWarning}>{autoResult.warning}</Text> : null}

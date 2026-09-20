@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import asyncio
 import csv
 import io
 import json
@@ -28,11 +29,30 @@ from .database import (
     inspection_from_row,
     profile_from_row,
     user_from_row,
+    yield_history_from_row,
 )
-from .copernicus import auto_detect_arable_boundary, fetch_field_satellite_series, fetch_field_risk_grid
+from .copernicus import (
+    auto_detect_arable_boundary,
+    close_http_client,
+    fetch_field_satellite_series,
+    fetch_field_risk_grid,
+)
 from .analytics import build_risk_zones, classify_land_use
 from .weather import get_field_agro_weather
-from .ai_advisor import analyze_crop_image_bytes, ask_agronomic_advisor
+from .climate_risk import get_field_climate_risk
+from .yield_forecast import get_yield_forecast
+from .field_operations import build_operations_recommendation, fetch_operations_weather
+from starlette.concurrency import run_in_threadpool
+
+from .ai_advisor import (
+    analyze_crop_image_bytes,
+    analyze_grain_quality_bytes,
+    ask_agronomic_advisor,
+    count_livestock_in_image_bytes,
+    count_seedlings_in_image_bytes,
+    count_seedlings_in_video_bytes,
+    count_seedlings_in_video_frames,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +94,14 @@ class AutoBoundaryInput(BaseModel):
     latitude: float = PydanticField(ge=-90, le=90)
     longitude: float = PydanticField(ge=-180, le=180)
     radiusMeters: float = PydanticField(default=700.0, ge=10.0, le=100_000.0)
+
+
+class YieldHistoryInput(BaseModel):
+    seasonYear: int = PydanticField(ge=1981, le=2100)
+    cropType: str | None = PydanticField(default=None, max_length=120)
+    yieldTPerHa: float = PydanticField(gt=0, le=150)
+    source: str = PydanticField(default="farm_record", max_length=32)
+    notes: str = PydanticField(default="", max_length=500)
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +155,14 @@ async def _load_analysis_bundle(field_id: str, user_id: str) -> tuple[dict, dict
     with connect() as connection:
         row = _load_owned_field(connection, field_id, user_id)
     field = field_from_row(row)
-    satellite = await fetch_field_satellite_series(field_id, field["boundary"])
-    grid = await fetch_field_risk_grid(field["boundary"])
-    zones = build_risk_zones(field_id, field["name"], field["areaHa"], grid)
     center_lat, center_lng = _field_center(field)
-    weather = await get_field_agro_weather(center_lat, center_lng)
+    # Спутник, сетка риска и погода независимы — тянем параллельно, а не по очереди.
+    satellite, grid, weather = await asyncio.gather(
+        fetch_field_satellite_series(field_id, field["boundary"]),
+        fetch_field_risk_grid(field["boundary"]),
+        get_field_agro_weather(center_lat, center_lng),
+    )
+    zones = build_risk_zones(field_id, field["name"], field["areaHa"], grid)
     return field, satellite, zones, weather
 
 
@@ -212,11 +243,11 @@ def _build_pdf_report(field: dict, satellite: dict, zones: dict, weather: dict, 
 
     latest = satellite.get("observations", [])[-1] if satellite.get("observations") else {}
     summary_data = [
-        ["NDVI", f"{latest.get('ndviMean', '—')}", "NDMI", f"{latest.get('ndmiMean', '—')}"],
-        ["Облачность", f"{latest.get('cloudCoveragePercent', '—')}%", "Очаги", str(zones.get("zonesCount", 0))],
-        ["Амплитуда NDVI", f"{classification.get('amplitude') or '—'}", "Осадки 7д", f"{weather['forecast7d']['precipSum']:.1f} мм"],
+        ["NDVI", f"{latest.get('ndviMean') if latest.get('ndviMean') is not None else '—'}", "NDMI", f"{latest.get('ndmiMean') if latest.get('ndmiMean') is not None else '—'}"],
+        ["Облачность", f"{latest.get('cloudCoveragePercent') if latest.get('cloudCoveragePercent') is not None else '—'}%", "Очаги", str(zones.get("zonesCount", 0)) if zones.get("status") == "ready" else "Нет данных"],
+        ["Амплитуда NDVI", f"{classification.get('amplitude') if classification.get('amplitude') is not None else '—'}", "Прогноз осадков 7д", f"{weather['forecast7d']['precipSum'] if weather['forecast7d']['precipSum'] is not None else '—'} мм"],
     ]
-    summary = Table(summary_data, colWidths=[92, 116, 92, 116])
+    summary = Table([[Paragraph(str(cell), styles["Normal"]) for cell in row] for row in summary_data], colWidths=[92, 116, 92, 116])
     summary.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), pdf_colors.HexColor("#F2F2F7")),
         ("GRID", (0, 0), (-1, -1), 0.4, pdf_colors.HexColor("#D1D1D6")),
@@ -236,7 +267,10 @@ def _build_pdf_report(field: dict, satellite: dict, zones: dict, weather: dict, 
             zone["recommendation"][:64],
         ])
     if len(zone_rows) == 1:
-        zone_rows.append(["—", "0 га", "—", "Очаги не выделены", "Плановый мониторинг"])
+        if zones.get("status") == "ready":
+            zone_rows.append(["—", "0 га", "—", "В доступных ячейках нет очагов", "Плановый мониторинг"])
+        else:
+            zone_rows.append(["—", "—", "—", "Недостаточно данных", "Повторить получение сетки"])
     zone_table = Table(zone_rows, colWidths=[24, 58, 46, 168, 190])
     zone_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), pdf_colors.HexColor("#1B5E20")),
@@ -249,7 +283,7 @@ def _build_pdf_report(field: dict, satellite: dict, zones: dict, weather: dict, 
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
     story.extend([Paragraph("Проблемные зоны", styles["Heading2"]), zone_table, Spacer(1, 10)])
-    story.append(Paragraph(f"Источник: {satellite.get('source')} · {weather.get('source')} · сформировано {datetime.now(timezone.utc).date().isoformat()}", styles["Italic"]))
+    story.append(Paragraph(f"Спутниковый период: {latest.get('date', '—')} — {latest.get('periodEnd', '—')}. Прогноз погоды: {weather.get('forecastStart', '—')} — {weather.get('forecastEnd', '—')}. Источник: {satellite.get('source')} · {weather.get('source')}. Сформировано {datetime.now(timezone.utc).date().isoformat()}", styles["Italic"]))
     doc.build(story)
     return buffer.getvalue()
 
@@ -258,10 +292,39 @@ def _build_pdf_report(field: dict, satellite: dict, zones: dict, weather: dict, 
 # App setup
 # ---------------------------------------------------------------------------
 
+async def _prewarm_satellite_cache() -> None:
+    """Прогреваем дисковый кэш спутника/сетки по всем полям в фоне при старте,
+    чтобы даже первое открытие поля с телефона отдавалось из кэша мгновенно,
+    а не ждало ~14с ответа Copernicus."""
+    try:
+        with connect() as connection:
+            rows = connection.execute("SELECT * FROM fields").fetchall()
+        fields = [field_from_row(row) for row in rows]
+    except Exception:
+        return
+
+    for field in fields:
+        boundary = field.get("boundary")
+        if not boundary:
+            continue
+        try:
+            # Последовательно и мягко, чтобы не упереться в лимиты Copernicus на старте.
+            await fetch_field_satellite_series(field["id"], boundary)
+            await fetch_field_risk_grid(boundary)
+        except Exception:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
-    yield
+    # Запускаем прогрев в фоне — не блокируем старт сервера.
+    prewarm_task = asyncio.create_task(_prewarm_satellite_cache())
+    try:
+        yield
+    finally:
+        prewarm_task.cancel()
+        await close_http_client()
 
 
 app = FastAPI(
@@ -593,8 +656,102 @@ def delete_field(field_id: str, user_id: str = Depends(require_user)) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Satellite, Zones, Weather
+# Yield forecast, Satellite, Zones, Weather
 # ---------------------------------------------------------------------------
+
+@app.get("/api/fields/{field_id}/yield-history")
+def list_field_yield_history(field_id: str, user_id: str = Depends(require_user)) -> list[dict]:
+    with connect() as connection:
+        _load_owned_field(connection, field_id, user_id)
+        rows = connection.execute(
+            "SELECT * FROM yield_history WHERE field_id = ? ORDER BY season_year DESC",
+            (field_id,),
+        ).fetchall()
+    return [yield_history_from_row(row) for row in rows]
+
+
+@app.post("/api/fields/{field_id}/yield-history", status_code=201)
+def create_field_yield_history(
+    field_id: str,
+    payload: YieldHistoryInput,
+    user_id: str = Depends(require_user),
+) -> dict:
+    current_year = datetime.now(timezone.utc).year
+    if payload.seasonYear >= current_year:
+        raise HTTPException(status_code=422, detail="Фактический урожай можно внести только за завершённый сезон")
+    if payload.source not in {"farm_record", "partner", "official_stat"}:
+        raise HTTPException(status_code=422, detail="Источник должен быть farm_record, partner или official_stat")
+    with connect() as connection:
+        field_row = _load_owned_field(connection, field_id, user_id)
+        crop_type = (payload.cropType or field_row["crop_type"]).strip()
+        record_id = f"yield-{uuid4()}"
+        try:
+            connection.execute(
+                """
+                INSERT INTO yield_history
+                    (id, field_id, season_year, crop_type, yield_t_ha, source, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    field_id,
+                    payload.seasonYear,
+                    crop_type,
+                    payload.yieldTPerHa,
+                    payload.source,
+                    payload.notes.strip(),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        except Exception as exc:
+            if "UNIQUE constraint failed" in str(exc):
+                raise HTTPException(status_code=409, detail="Урожайность за этот сезон уже внесена") from exc
+            raise
+        row = connection.execute("SELECT * FROM yield_history WHERE id = ?", (record_id,)).fetchone()
+    return yield_history_from_row(row)
+
+
+@app.delete("/api/fields/{field_id}/yield-history/{record_id}", status_code=204)
+def delete_field_yield_history(
+    field_id: str,
+    record_id: str,
+    user_id: str = Depends(require_user),
+) -> None:
+    with connect() as connection:
+        _load_owned_field(connection, field_id, user_id)
+        result = connection.execute(
+            "DELETE FROM yield_history WHERE id = ? AND field_id = ?",
+            (record_id, field_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Сезон не найден")
+
+
+@app.get("/api/fields/{field_id}/yield-forecast")
+async def get_field_yield_forecast_endpoint(field_id: str, user_id: str = Depends(require_user)) -> dict:
+    with connect() as connection:
+        row = _load_owned_field(connection, field_id, user_id)
+        history_rows = connection.execute(
+            "SELECT * FROM yield_history WHERE field_id = ? ORDER BY season_year DESC",
+            (field_id,),
+        ).fetchall()
+    field = field_from_row(row)
+    history = [yield_history_from_row(item) for item in history_rows]
+    return await get_yield_forecast(field, history)
+
+
+@app.get("/api/fields/{field_id}/operations-recommendation")
+async def get_field_operations_recommendation(field_id: str, user_id: str = Depends(require_user)) -> dict:
+    """Задача 2.3 — погодные окна сева/посадки и уборки с учётом Sentinel-2."""
+    with connect() as connection:
+        row = _load_owned_field(connection, field_id, user_id)
+    field = field_from_row(row)
+    latitude, longitude = _field_center(field)
+    satellite, operations_weather = await asyncio.gather(
+        fetch_field_satellite_series(field_id, field["boundary"]),
+        fetch_operations_weather(latitude, longitude),
+    )
+    return build_operations_recommendation(field, satellite, operations_weather)
 
 @app.get("/api/fields/{field_id}/satellite")
 async def get_field_satellite(field_id: str, user_id: str = Depends(require_user)) -> dict:
@@ -625,6 +782,21 @@ async def get_field_weather(field_id: str, user_id: str = Depends(require_user))
     else:
         center_lat, center_lng = 53.303, 69.385
     return await get_field_agro_weather(center_lat, center_lng)
+
+
+@app.get("/api/fields/{field_id}/climate-risk")
+async def get_field_climate_risk_endpoint(field_id: str, user_id: str = Depends(require_user)) -> dict:
+    """Задача 2.2 — декадный индекс риска засухи/суховея/раннего снега по полю."""
+    with connect() as connection:
+        row = _load_owned_field(connection, field_id, user_id)
+    field = field_from_row(row)
+    boundary = field["boundary"]
+    if boundary:
+        center_lat = sum(p["latitude"] for p in boundary) / len(boundary)
+        center_lng = sum(p["longitude"] for p in boundary) / len(boundary)
+    else:
+        center_lat, center_lng = 53.303, 69.385
+    return await get_field_climate_risk(center_lat, center_lng)
 
 
 @app.get("/api/fields/{field_id}/classification")
@@ -679,6 +851,7 @@ async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) 
         "humidity_percent",
         "wind_mps",
         "precip_7d_mm",
+        "record_type", "period_end", "clear_pixel_percent", "valid_pixels", "source", "retrieved_at",
     ])
     observations = satellite.get("observations", [])
     if observations:
@@ -690,16 +863,14 @@ async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) 
                 obs.get("ndviMean"),
                 obs.get("ndmiMean"),
                 obs.get("cloudCoveragePercent"),
-                weather["current"]["temperature"],
-                weather["current"]["humidity"],
-                weather["current"]["windSpeed"],
-                weather["forecast7d"]["precipSum"],
+                "", "", "", "",
+                "satellite_interval", obs.get("periodEnd"), obs.get("clearPixelPercent"),
+                obs.get("validPixelCount"), satellite.get("source"), satellite.get("updatedAt"),
             ])
-    else:
-        writer.writerow([
+    writer.writerow([
             field["id"],
             field["name"],
-            "",
+            weather.get("observedAt", ""),
             "",
             "",
             "",
@@ -707,6 +878,7 @@ async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) 
             weather["current"]["humidity"],
             weather["current"]["windSpeed"],
             weather["forecast7d"]["precipSum"],
+            "weather_model_snapshot", weather.get("forecastEnd"), "", "", weather.get("source"), weather.get("updatedAt"),
         ])
     return Response(
         content=output.getvalue(),
@@ -864,7 +1036,117 @@ async def ai_diagnose_photo(request: Request) -> dict:
     if not image_bytes:
         raise HTTPException(status_code=422, detail="Загрузите изображение для анализа")
 
-    return analyze_crop_image_bytes(image_bytes, filename)
+    # Диагностика делает синхронный вызов Gemini Vision — выносим в пул потоков,
+    # чтобы не блокировать event loop (иначе все параллельные запросы встают в очередь).
+    return await run_in_threadpool(analyze_crop_image_bytes, image_bytes, filename)
+
+
+async def _extract_uploaded_image(request: Request) -> tuple[bytes, str]:
+    """Достаёт байты изображения из JSON (photo_base64) или multipart-формы."""
+    content_type = request.headers.get("content-type", "")
+    image_bytes: bytes | None = None
+    filename = "photo.jpg"
+
+    if "application/json" in content_type:
+        body = await request.json()
+        b64 = body.get("photo_base64")
+        if b64:
+            import base64
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(b64)
+            except Exception:
+                image_bytes = None
+            filename = str(body.get("photo_name") or "photo.jpg")
+    else:
+        form = await request.form()
+        photo_field = form.get("photo")
+        if photo_field and hasattr(photo_field, "read"):
+            image_bytes = await photo_field.read()
+            filename = getattr(photo_field, "filename", "photo.jpg") or "photo.jpg"
+
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="Загрузите изображение для анализа")
+    return image_bytes, filename
+
+
+@app.post("/api/ai/count-seedlings")
+async def ai_count_seedlings(request: Request) -> dict:
+    """Задача 3.2 — подсчёт всходов и оценка густоты стояния по фото/видео/кадру с дрона."""
+    content_type = request.headers.get("content-type", "")
+    calibrated_area_m2: float | None = None
+
+    # Видео: JSON с полем video_frames_base64 (быстрый путь — кадры с телефона) или video_base64
+    if "application/json" in content_type:
+        body = await request.json()
+        raw_area = body.get("frame_area_m2")
+        if raw_area not in (None, ""):
+            try:
+                calibrated_area_m2 = float(raw_area)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail="Площадь кадра должна быть числом в м²")
+            if not 0.01 <= calibrated_area_m2 <= 10_000:
+                raise HTTPException(status_code=422, detail="Площадь кадра должна быть от 0.01 до 10000 м²")
+
+        frames_b64 = body.get("video_frames_base64")
+        if isinstance(frames_b64, list) and frames_b64:
+            import base64 as _b64
+            frames: list[bytes] = []
+            for encoded in frames_b64[:4]:
+                if not isinstance(encoded, str):
+                    continue
+                if "," in encoded:
+                    encoded = encoded.split(",", 1)[1]
+                try:
+                    frame = _b64.b64decode(encoded)
+                except Exception:
+                    continue
+                if frame and len(frame) <= 8_000_000:
+                    frames.append(frame)
+            if not frames:
+                raise HTTPException(status_code=422, detail="Не удалось прочитать кадры видео")
+            filename = str(body.get("photo_name") or "field.mp4")
+            return await run_in_threadpool(
+                count_seedlings_in_video_frames, frames, filename, calibrated_area_m2
+            )
+
+        video_b64 = body.get("video_base64")
+        if video_b64:
+            import base64 as _b64
+            if "," in video_b64:
+                video_b64 = video_b64.split(",", 1)[1]
+            try:
+                video_bytes = _b64.b64decode(video_b64)
+            except Exception:
+                raise HTTPException(status_code=422, detail="Не удалось прочитать видео")
+            if not video_bytes:
+                raise HTTPException(status_code=422, detail="Загрузите видео для анализа")
+            mime_type = str(body.get("mime_type") or "video/mp4")
+            filename = str(body.get("photo_name") or "field.mp4")
+            return await run_in_threadpool(
+                count_seedlings_in_video_bytes, video_bytes, mime_type, filename
+            )
+
+    # Иначе — фото (JSON photo_base64 или multipart)
+    image_bytes, filename = await _extract_uploaded_image(request)
+    return await run_in_threadpool(
+        count_seedlings_in_image_bytes, image_bytes, filename, calibrated_area_m2
+    )
+
+
+@app.post("/api/ai/grain-quality")
+async def ai_grain_quality(request: Request) -> dict:
+    """Задача 3.3 — контроль качества зерна по фото пробы (примеси, битое, повреждённое)."""
+    image_bytes, filename = await _extract_uploaded_image(request)
+    return await run_in_threadpool(analyze_grain_quality_bytes, image_bytes, filename)
+
+
+@app.post("/api/ai/count-livestock")
+async def ai_count_livestock(request: Request) -> dict:
+    """Задача 3.4 — идентификация и предварительный визуальный подсчёт скота по фото."""
+    image_bytes, filename = await _extract_uploaded_image(request)
+    return await run_in_threadpool(count_livestock_in_image_bytes, image_bytes, filename)
 
 
 class AiChatInput(BaseModel):
@@ -878,4 +1160,3 @@ def ai_agronomic_chat(input_data: AiChatInput) -> dict:
         raise HTTPException(status_code=422, detail="Введите вопрос агроному")
     answer = ask_agronomic_advisor(input_data.question, input_data.history)
     return {"question": input_data.question, "answer": answer}
-

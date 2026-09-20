@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -23,8 +23,11 @@ import {
   deleteField,
   getField,
   getFieldClassification,
+  getFieldClimateRisk,
+  getFieldOperationsRecommendation,
   getFieldSatellite,
   getFieldWeather,
+  getFieldYieldForecast,
   getFieldZones,
   listInspections,
   syncOfflineQueue,
@@ -35,16 +38,59 @@ import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
 import {
   AgroWeather,
+  ClimateRiskForecast,
   Field,
+  FieldOperationsRecommendation,
   Inspection,
   LandUseClassification,
   RiskZone,
   SatelliteData,
   SatelliteObservation,
+  YieldForecast,
   ZonesData,
 } from '../../src/types/domain';
 
 type MapMode = 'zones' | 'satellite' | 'boundary';
+
+function measurement(value: number | null | undefined, unit = '', digits = 1): string {
+  return value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(digits)}${unit}`;
+}
+
+function shortDay(iso: string): string {
+  return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: 'short' })
+    .format(new Date(`${iso}T12:00:00`));
+}
+
+function riskLevelMeta(level: string): { label: string; color: string; bg: string } {
+  switch (level) {
+    case 'high':
+      return { label: 'Высокий', color: '#B91C1C', bg: '#FEE2E2' };
+    case 'moderate':
+      return { label: 'Умеренный', color: '#B45309', bg: '#FEF3C7' };
+    default:
+      return { label: 'Низкий', color: '#166534', bg: '#DCFCE7' };
+  }
+}
+
+function RiskMiniBar({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <View style={rmbStyles.row}>
+      <Text style={rmbStyles.label} numberOfLines={1}>{label}</Text>
+      <View style={rmbStyles.track}>
+        <View style={[rmbStyles.fill, { width: `${Math.min(Math.max(value, 0), 100)}%`, backgroundColor: color }]} />
+      </View>
+      <Text style={[rmbStyles.val, { color }]}>{value}</Text>
+    </View>
+  );
+}
+
+const rmbStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
+  label: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.text, width: 96 },
+  track: { flex: 1, height: 6, borderRadius: 3, backgroundColor: colors.surfaceSecondary, overflow: 'hidden' },
+  fill: { height: 6, borderRadius: 3 },
+  val: { fontFamily: fontFamilies.bold, fontSize: 11, width: 24, textAlign: 'right' },
+});
 
 const NDVI_LEGEND_COLORS = ['#BD0026', '#F03B20', '#FD8D3C', '#FED976', '#78C679', '#238443'];
 
@@ -233,7 +279,7 @@ function IndexHistory({ observations }: { observations: SatelliteObservation[] }
           <Text style={[historyStyles.valueCell, historyStyles.dateCell]}>{item.date}</Text>
           <Text style={historyStyles.valueCell}>{item.ndviMean.toFixed(2)}</Text>
           <Text style={historyStyles.valueCell}>{item.ndmiMean == null ? '—' : item.ndmiMean.toFixed(2)}</Text>
-          <Text style={historyStyles.valueCell}>{item.cloudCoveragePercent.toFixed(0)}%</Text>
+          <Text style={historyStyles.valueCell}>{measurement(item.cloudCoveragePercent, '%', 0)}</Text>
         </View>
       ))}
     </Card>
@@ -275,6 +321,8 @@ export default function FieldScreen() {
   const initialZones = id ? getMemoryCache<ZonesData>(CACHE_KEYS.ZONES(id)) : null;
   const initialWeather = id ? getMemoryCache<AgroWeather>(CACHE_KEYS.WEATHER(id)) : null;
   const initialClass = id ? getMemoryCache<LandUseClassification>(CACHE_KEYS.CLASSIFICATION(id)) : null;
+  const initialYield = id ? getMemoryCache<YieldForecast>(CACHE_KEYS.YIELD_FORECAST(id)) : null;
+  const initialOperations = id ? getMemoryCache<FieldOperationsRecommendation>(CACHE_KEYS.OPERATIONS(id)) : null;
 
   const [field, setField] = useState<Field | null>(initialField);
   const [inspections, setInspections] = useState<Inspection[]>(initialInspections);
@@ -282,75 +330,94 @@ export default function FieldScreen() {
   const [zonesData, setZonesData] = useState<ZonesData | null>(initialZones);
   const [weather, setWeather] = useState<AgroWeather | null>(initialWeather);
   const [classification, setClassification] = useState<LandUseClassification | null>(initialClass);
+  const [climateRisk, setClimateRisk] = useState<ClimateRiskForecast | null>(null);
+  const [yieldForecast, setYieldForecast] = useState<YieldForecast | null>(initialYield);
+  const [operations, setOperations] = useState<FieldOperationsRecommendation | null>(initialOperations);
   const [mapMode, setMapMode] = useState<MapMode>('zones');
   const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
   const [selectedZone, setSelectedZone] = useState<RiskZone | null>(initialZones?.zones?.[0] ?? null);
   const [loading, setLoading] = useState(!initialField);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Refs let `load` stay stable (dep only on id) so useFocusEffect doesn't re-fire
+  // in a loop each time we setField/setSelectedZone — that loop caused the flicker.
+  const fieldRef = useRef(field);
+  useEffect(() => { fieldRef.current = field; }, [field]);
+  const isLoadingRef = useRef(false);
+
   const load = useCallback(async () => {
-    if (!id) return;
+    if (!id || isLoadingRef.current) return;
+    isLoadingRef.current = true;
 
-    // 1. If memory was empty on cold start, try disk cache immediately
-    if (!field) {
-      const cachedField = await getLocalCache<Field>(CACHE_KEYS.FIELD(id));
-      if (cachedField) {
-        setField(cachedField);
-        const [cachedInsp, cachedSat, cachedZones, cachedW, cachedCl] = await Promise.all([
-          getLocalCache<Inspection[]>(CACHE_KEYS.INSPECTIONS(id)),
-          getLocalCache<SatelliteData>(CACHE_KEYS.SATELLITE(id)),
-          getLocalCache<ZonesData>(CACHE_KEYS.ZONES(id)),
-          getLocalCache<AgroWeather>(CACHE_KEYS.WEATHER(id)),
-          getLocalCache<LandUseClassification>(CACHE_KEYS.CLASSIFICATION(id)),
-        ]);
-        if (cachedInsp) setInspections(cachedInsp);
-        if (cachedSat) setSatellite(cachedSat);
-        if (cachedZones) {
-          setZonesData(cachedZones);
-          if (cachedZones.zones.length > 0) setSelectedZone(cachedZones.zones[0]);
-        }
-        if (cachedW) setWeather(cachedW);
-        if (cachedCl) setClassification(cachedCl);
-        setLoading(false);
-      } else {
-        setLoading(true);
-      }
-    }
-
-    setError(null);
     try {
+      // 1. If memory was empty on cold start, try disk cache immediately
+      if (!fieldRef.current) {
+        const cachedField = await getLocalCache<Field>(CACHE_KEYS.FIELD(id));
+        if (cachedField) {
+          setField(cachedField);
+          const [cachedInsp, cachedSat, cachedZones, cachedW, cachedCl, cachedYield, cachedOperations] = await Promise.all([
+            getLocalCache<Inspection[]>(CACHE_KEYS.INSPECTIONS(id)),
+            getLocalCache<SatelliteData>(CACHE_KEYS.SATELLITE(id)),
+            getLocalCache<ZonesData>(CACHE_KEYS.ZONES(id)),
+            getLocalCache<AgroWeather>(CACHE_KEYS.WEATHER(id)),
+            getLocalCache<LandUseClassification>(CACHE_KEYS.CLASSIFICATION(id)),
+            getLocalCache<YieldForecast>(CACHE_KEYS.YIELD_FORECAST(id)),
+            getLocalCache<FieldOperationsRecommendation>(CACHE_KEYS.OPERATIONS(id)),
+          ]);
+          const cachedRisk = await getLocalCache<ClimateRiskForecast>(CACHE_KEYS.CLIMATE_RISK(id));
+          if (cachedInsp) setInspections(cachedInsp);
+          if (cachedSat) setSatellite(cachedSat);
+          if (cachedZones) {
+            setZonesData(cachedZones);
+            if (cachedZones.zones.length > 0) setSelectedZone((prev) => prev ?? cachedZones.zones[0]);
+          }
+          if (cachedW) setWeather(cachedW);
+          if (cachedCl) setClassification(cachedCl);
+          if (cachedYield) setYieldForecast(cachedYield);
+          if (cachedOperations) setOperations(cachedOperations);
+          if (cachedRisk) setClimateRisk(cachedRisk);
+          setLoading(false);
+        } else {
+          setLoading(true);
+        }
+      }
+
+      setError(null);
+      setRefreshing(true);
       void syncOfflineQueue().catch(() => {});
 
-      const [fieldRes, inspectionsRes, satRes, zonesRes, weatherRes, classificationRes] = await Promise.allSettled([
-        getField(id),
-        listInspections(id),
-        getFieldSatellite(id),
-        getFieldZones(id),
-        getFieldWeather(id),
-        getFieldClassification(id),
-      ]);
+      // Не ждём самый медленный запрос (спутник) — показываем экран сразу, как только
+      // пришло само поле (быстрый запрос к БД), а тяжёлые секции дозагружаются отдельно.
+      const fieldTask = getField(id)
+        .then((value) => setField(value))
+        .catch((err) => {
+          if (!fieldRef.current) setError(err instanceof Error ? err.message : 'Не удалось загрузить поле');
+        })
+        .finally(() => setLoading(false));
 
-      if (fieldRes.status === 'fulfilled') {
-        setField(fieldRes.value);
-      } else if (!field) {
-        throw new Error(fieldRes.reason instanceof Error ? fieldRes.reason.message : 'Не удалось загрузить поле');
-      }
-      if (inspectionsRes.status === 'fulfilled') setInspections(inspectionsRes.value);
-      if (satRes.status === 'fulfilled') setSatellite(satRes.value);
-      if (zonesRes.status === 'fulfilled') {
-        setZonesData(zonesRes.value);
-        if (zonesRes.value.zones.length > 0 && !selectedZone) setSelectedZone(zonesRes.value.zones[0]);
-      }
-      if (weatherRes.status === 'fulfilled') setWeather(weatherRes.value);
-      if (classificationRes.status === 'fulfilled') setClassification(classificationRes.value);
-    } catch (nextError) {
-      if (!field) {
-        setError(nextError instanceof Error ? nextError.message : 'Ошибка загрузки');
-      }
+      const rest = [
+        listInspections(id).then(setInspections).catch(() => {}),
+        getFieldSatellite(id).then(setSatellite).catch(() => {}),
+        getFieldZones(id)
+          .then((value) => {
+            setZonesData(value);
+            if (value.zones.length > 0) setSelectedZone((prev) => prev ?? value.zones[0]);
+          })
+          .catch(() => {}),
+        getFieldWeather(id).then(setWeather).catch(() => {}),
+        getFieldClassification(id).then(setClassification).catch(() => {}),
+        getFieldClimateRisk(id).then(setClimateRisk).catch(() => {}),
+        getFieldYieldForecast(id).then(setYieldForecast).catch(() => {}),
+        getFieldOperationsRecommendation(id).then(setOperations).catch(() => {}),
+      ];
+
+      await Promise.allSettled([fieldTask, ...rest]);
     } finally {
-      setLoading(false);
+      setRefreshing(false);
+      isLoadingRef.current = false;
     }
-  }, [id, field, selectedZone]);
+  }, [id]);
 
   useFocusEffect(useCallback(() => { void load(); }, [load]));
 
@@ -431,7 +498,16 @@ export default function FieldScreen() {
     : colors.text;
 
   return (
-    <Screen contentStyle={styles.content}>
+    <View style={{ flex: 1 }}>
+      {refreshing && !loading && (
+        <View style={styles.refreshingOverlay} pointerEvents="none">
+          <View style={styles.refreshingChip}>
+            <ActivityIndicator size="small" color={colors.primaryDark} />
+            <Text style={styles.refreshingText}>Обновляем данные…</Text>
+          </View>
+        </View>
+      )}
+      <Screen contentStyle={styles.content}>
 
       {/* ── 1. OVERVIEW CARD ───────────────────────────────────── */}
       <Card style={styles.overviewCard}>
@@ -488,7 +564,7 @@ export default function FieldScreen() {
       {/* ── 2. SATELLITE STATUS ────────────────────────────────── */}
       <SectionLabel
         title="СПУТНИКОВЫЙ АНАЛИЗ"
-        right={satellite?.status === 'ready' ? 'Sentinel Hub · live' : undefined}
+        right={satellite?.status === 'ready' ? 'Copernicus · 10-дневные периоды' : undefined}
       />
       <Card style={styles.satCard}>
         <View style={styles.satMissionRow}>
@@ -505,7 +581,7 @@ export default function FieldScreen() {
           <>
             <View style={styles.satStatsRow}>
               <View style={styles.satStatCell}>
-                <Text style={[styles.satStatVal, { color: ndviStatusColor }]}>{latestObs.ndviMean.toFixed(2)}</Text>
+                <Text style={[styles.satStatVal, { color: ndviStatusColor }]}>{(latestObs.ndviMedian ?? latestObs.ndviMean).toFixed(2)}</Text>
                 <Text style={styles.satStatLabel}>NDVI поля</Text>
               </View>
               <View style={styles.vertDiv} />
@@ -515,14 +591,25 @@ export default function FieldScreen() {
               </View>
               <View style={styles.vertDiv} />
               <View style={styles.satStatCell}>
-                <Text style={styles.satStatVal}>{latestObs.cloudCoveragePercent.toFixed(0)}%</Text>
+                <Text style={styles.satStatVal}>{measurement(latestObs.cloudCoveragePercent, '%', 0)}</Text>
                 <Text style={styles.satStatLabel}>Облачность</Text>
               </View>
             </View>
             <View style={styles.hairline} />
             <View style={styles.satObsRow}>
-              <Text style={styles.satObsText} numberOfLines={1}>Снимок от {latestObs.date}</Text>
+              <Text style={styles.satObsText}>
+                Период {latestObs.date} — {latestObs.periodEnd ?? '—'}
+                {latestObs.clearPixelPercent != null ? ` · пригодно ${latestObs.clearPixelPercent.toFixed(0)}% доступных пикселей` : ''}
+              </Text>
+              {latestObs.reliability ? (
+                <View style={[styles.relBadge, { backgroundColor: riskLevelMeta(latestObs.reliability === 'high' ? 'low' : latestObs.reliability === 'medium' ? 'moderate' : 'high').bg }]}>
+                  <Text style={[styles.relBadgeText, { color: riskLevelMeta(latestObs.reliability === 'high' ? 'low' : latestObs.reliability === 'medium' ? 'moderate' : 'high').color }]}>
+                    {latestObs.reliability === 'high' ? 'Хорошее покрытие' : latestObs.reliability === 'medium' ? 'Частичное покрытие' : 'Качество неизвестно'}
+                  </Text>
+                </View>
+              ) : null}
             </View>
+            {satellite.stale && <Text style={styles.pendingText}>Сохранённые данные: обновление не удалось.</Text>}
             {latestObs.anomalyDetected && latestObs.anomalyFactor && (
               <View style={styles.anomalyBox}>
                 <Text style={styles.anomalyText}>{latestObs.anomalyFactor}</Text>
@@ -551,30 +638,210 @@ export default function FieldScreen() {
               value={`${satellite.periodStart ?? satellite.observations[0].date} — ${satellite.periodEnd ?? latestObs?.date}`}
             />
             <View style={styles.hairline} />
-            <InfoRow label="Пространственное разрешение" value={`${satellite.spatialResolutionMeters} м/пикс`} />
+            <InfoRow label="Исходные каналы" value="NDVI: 10 м · SWIR для NDMI: 20 м" />
             <View style={styles.hairline} />
             <InfoRow label="Маска облаков" value={satellite.cloudMaskingMethod} />
+            <View style={styles.hairline} />
+            <InfoRow label="Получено с сервера" value={new Date(satellite.updatedAt).toLocaleString('ru-RU')} />
+            <InfoRow label="Валидных пикселей" value={latestObs?.validPixelCount?.toString() ?? '—'} />
+            <InfoRow label="Разброс NDVI (p90–p10)" value={measurement(latestObs?.ndviSpread, '', 3)} />
           </Card>
         </>
       )}
 
+      {/* ── 2.1 YIELD FORECAST ────────────────────────────────── */}
+      <SectionLabel
+        title="ПРОГНОЗ УРОЖАЙНОСТИ"
+        right={yieldForecast?.status === 'ready' ? `${yieldForecast.seasonYear} · модель поля` : undefined}
+      />
+      <Card style={styles.yieldCard}>
+        {yieldForecast?.status === 'ready' && yieldForecast.forecastTPerHa != null && yieldForecast.interval80 ? (
+          <>
+            <View style={styles.yieldHero}>
+              <View style={styles.yieldMain}>
+                <View style={styles.yieldValueRow}>
+                  <Text style={styles.yieldValue}>{yieldForecast.forecastTPerHa.toFixed(2)}</Text>
+                  <Text style={styles.yieldUnit}>т/га</Text>
+                </View>
+                <Text style={styles.yieldCaption}>ожидаемая урожайность</Text>
+              </View>
+              <View style={styles.yieldInterval}>
+                <Text style={styles.yieldIntervalValue}>
+                  {yieldForecast.interval80.low.toFixed(2)}–{yieldForecast.interval80.high.toFixed(2)}
+                </Text>
+                <Text style={styles.yieldIntervalLabel}>80% прогнозный интервал</Text>
+              </View>
+            </View>
+            <View style={styles.hairline} />
+            <View style={styles.yieldMetaRow}>
+              <Text style={styles.yieldMeta}>История: {yieldForecast.historyCount} сез.</Text>
+              <Text style={styles.yieldMeta}>
+                MAE проверки: {measurement(yieldForecast.validationMaeTPerHa, ' т/га', 2)}
+              </Text>
+            </View>
+            <View style={styles.hairline} />
+            <View style={styles.factorList}>
+              {yieldForecast.factors.slice(0, 4).map((factor) => {
+                const factorColor = factor.direction === 'positive'
+                  ? '#166534'
+                  : factor.direction === 'negative'
+                    ? '#B91C1C'
+                    : colors.textSecondary;
+                return (
+                  <View key={factor.id} style={styles.factorRow}>
+                    <View style={styles.factorText}>
+                      <Text style={styles.factorLabel}>{factor.label}</Text>
+                      <Text style={styles.factorDetail}>{factor.detail}</Text>
+                    </View>
+                    <Text style={[styles.factorValue, { color: factorColor }]}>
+                      {factor.contributionTPerHa > 0 ? '+' : ''}{factor.contributionTPerHa.toFixed(2)} т/га
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+            <Text style={styles.yieldDisclaimer}>
+              {yieldForecast.stale ? 'Показан сохранённый прогноз: обновление недоступно. ' : ''}
+              Вклад модели не доказывает причинность. Диапазон рассчитан по ошибкам исключённых сезонов.
+            </Text>
+          </>
+        ) : (
+          <View style={styles.yieldEmpty}>
+            <Text style={styles.yieldEmptyTitle}>
+              {yieldForecast?.status === 'unavailable' ? 'Прогноз временно недоступен' : 'Нужна история урожаев'}
+            </Text>
+            <Text style={styles.yieldEmptyText}>
+              {yieldForecast?.message ?? 'Добавьте фактическую урожайность прошлых сезонов для калибровки модели этого поля.'}
+            </Text>
+            {yieldForecast?.missingData.map((item) => (
+              <Text key={item} style={styles.yieldMissing}>• {item}</Text>
+            ))}
+          </View>
+        )}
+        <View style={styles.hairline} />
+        <ActionRow
+          title="История урожайности и источники"
+          onPress={() => router.push({ pathname: '/field/[id]/yield-history', params: { id: field.id } })}
+        />
+      </Card>
+
+      {/* ── 2.3 FIELD OPERATION WINDOWS ──────────────────────── */}
+      <SectionLabel
+        title="СРОКИ ПОЛЕВЫХ РАБОТ"
+        right={operations?.horizonStart && operations.horizonEnd
+          ? `${shortDay(operations.horizonStart)}–${shortDay(operations.horizonEnd)}`
+          : undefined}
+      />
+      <Card style={styles.operationsCard}>
+        {operations?.status === 'ready' ? (
+          <>
+            <View style={styles.fieldStateRow}>
+              <View style={styles.fieldStateText}>
+                <Text style={styles.fieldStateTitle}>{operations.fieldState.label}</Text>
+                <Text style={styles.fieldStateDetail}>{operations.fieldState.message}</Text>
+              </View>
+              {operations.fieldState.declineFromPeak != null ? (
+                <View style={styles.ndviDeltaBox}>
+                  <Text style={styles.ndviDeltaValue}>−{operations.fieldState.declineFromPeak.toFixed(2)}</Text>
+                  <Text style={styles.ndviDeltaLabel}>от пика NDVI</Text>
+                </View>
+              ) : null}
+            </View>
+            <View style={styles.hairline} />
+            {operations.operations.map((operation, index) => {
+              const best = operation.windows[0];
+              const badgeLabel = operation.status === 'recommended'
+                ? 'Оптимальное окно'
+                : operation.status === 'watch'
+                  ? 'Наблюдать'
+                  : operation.status === 'verify_field'
+                    ? 'Проверить поле'
+                    : operation.status === 'no_window'
+                      ? 'Окна нет'
+                      : 'Вне сезона';
+              const badgeVariant = operation.status === 'recommended'
+                ? 'success'
+                : operation.status === 'watch' || operation.status === 'verify_field'
+                  ? 'warning'
+                  : 'neutral';
+              return (
+                <View key={operation.type}>
+                  {index > 0 ? <View style={styles.hairline} /> : null}
+                  <View style={styles.operationBlock}>
+                    <View style={styles.operationHeader}>
+                      <View style={styles.operationHeading}>
+                        <Text style={styles.operationTitle}>{operation.title}</Text>
+                        <Text style={styles.operationCalendar}>сезонный ориентир {operation.calendar}</Text>
+                      </View>
+                      <Badge label={badgeLabel} variant={badgeVariant} />
+                    </View>
+                    {best ? (
+                      <>
+                        <View style={styles.bestWindowRow}>
+                          <View>
+                            <Text style={styles.bestWindowDate}>{shortDay(best.start)}–{shortDay(best.end)}</Text>
+                            <Text style={styles.bestWindowLabel}>лучшее доступное окно</Text>
+                          </View>
+                          <View style={styles.windowScoreBox}>
+                            <Text style={styles.windowScore}>{best.score}</Text>
+                            <Text style={styles.windowScoreLabel}>из 100</Text>
+                          </View>
+                        </View>
+                        <View style={styles.operationMetrics}>
+                          <Text style={styles.operationMetric}>{best.metrics.precipSum.toFixed(1)} мм осадков</Text>
+                          <Text style={styles.operationMetric}>ветер до {best.metrics.maxWind.toFixed(1)} м/с</Text>
+                          {operation.type === 'sowing' && best.metrics.soilTemperature != null ? (
+                            <Text style={styles.operationMetric}>почва {best.metrics.soilTemperature.toFixed(1)}°C</Text>
+                          ) : null}
+                        </View>
+                        <Text style={styles.operationFactors}>{best.factors.join(' · ')}</Text>
+                        {best.risks.length > 0 ? <Text style={styles.operationRisks}>{best.risks.join(' · ')}</Text> : null}
+                        {operation.windows.length > 1 ? (
+                          <Text style={styles.alternativeWindows}>
+                            Запасные окна: {operation.windows.slice(1).map((item) => `${shortDay(item.start)}–${shortDay(item.end)}`).join(', ')}
+                          </Text>
+                        ) : null}
+                      </>
+                    ) : (
+                      <Text style={styles.operationSummary}>{operation.summary}</Text>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
+            <View style={styles.hairline} />
+            <Text style={styles.operationsDisclaimer}>
+              {operations.stale ? 'Показана сохранённая рекомендация. ' : ''}{operations.message}
+            </Text>
+          </>
+        ) : (
+          <View style={styles.yieldEmpty}>
+            <Text style={styles.yieldEmptyTitle}>Сроки пока не рассчитаны</Text>
+            <Text style={styles.yieldEmptyText}>{operations?.message ?? 'Получаем прогноз погоды и состояние поля.'}</Text>
+          </View>
+        )}
+      </Card>
+
       {/* ── 3. WEATHER ─────────────────────────────────────────── */}
       {weather && (
         <>
-          <SectionLabel title="АГРОМЕТЕОРОЛОГИЯ" right="Open-Meteo · актуально" />
+          <SectionLabel title="АГРОМЕТЕОРОЛОГИЯ" right={weather.source} />
           <Card style={styles.weatherCard}>
+            <Text style={styles.riskSource}>{weather.message ?? `Модельные условия на ${weather.observedAt ?? '—'}. Прогноз ${weather.forecastStart ?? '—'} — ${weather.forecastEnd ?? '—'}.`}</Text>
             <View style={styles.weatherGrid}>
-              <WeatherCell value={`${weather.current.temperature.toFixed(1)}°C`} label="Температура" />
-              <WeatherCell value={`${weather.current.humidity}%`} label="Влажность" />
-              <WeatherCell value={`${weather.current.windSpeed.toFixed(1)} м/с`} label="Ветер сейчас" />
-              <WeatherCell value={`${weather.forecast7d.precipSum.toFixed(1)} мм`} label="Осадки за 7 дней" />
+              <WeatherCell value={measurement(weather.current.temperature, '°C')} label="Температура" />
+              <WeatherCell value={measurement(weather.current.humidity, '%', 0)} label="Влажность воздуха" />
+              <WeatherCell value={measurement(weather.current.windSpeed, ' м/с')} label="Ветер" />
+              <WeatherCell value={measurement(weather.forecast7d.precipSum, ' мм')} label="Осадки: прогноз 7 дней" />
+              <WeatherCell value={measurement(weather.forecast7d.minTemp, '°C')} label="Минимум по прогнозу" />
+              <WeatherCell value={measurement(weather.forecast7d.waterBalance, ' мм')} label="Прогноз: осадки − ET₀" />
             </View>
 
-            {weather.forecast7d.evapotranspiration > 0 && (
+            {weather.forecast7d.evapotranspiration != null && (
               <>
                 <View style={styles.hairline} />
                 <View style={styles.etRow}>
-                  <Text style={styles.etLabel} numberOfLines={1}>Испаряемость за 7 дней (ET₀)</Text>
+                  <Text style={styles.etLabel}>Прогноз ET₀ на 7 дней</Text>
                   <Text style={styles.etValue}>{weather.forecast7d.evapotranspiration.toFixed(1)} мм</Text>
                 </View>
               </>
@@ -584,7 +851,7 @@ export default function FieldScreen() {
               <>
                 <View style={styles.hairline} />
                 <View style={styles.etRow}>
-                  <Text style={styles.etLabel} numberOfLines={1}>Сумма эфф. температур (GDD, база 5°C)</Text>
+                  <Text style={styles.etLabel}>Прогноз GDD за 7 дней, база 5°C</Text>
                   <Text style={styles.etValue}>{weather.forecast7d.gddSum.toFixed(0)}°</Text>
                 </View>
               </>
@@ -600,11 +867,73 @@ export default function FieldScreen() {
         </>
       )}
 
+      {/* ── 3b. КЛИМАТИЧЕСКИЙ РИСК ПО ДЕКАДАМ (задача 2.2) ────────── */}
+      {climateRisk && climateRisk.available && climateRisk.decades.length > 0 && (
+        <>
+          <SectionLabel title="ИНДЕКС ПО ДЕКАДАМ" right="шкала правил 0–100" />
+          <Card style={styles.weatherCard}>
+            <Text style={styles.riskSummary}>{climateRisk.summary}</Text>
+
+            {climateRisk.alerts.map((a, i) => (
+              <View
+                key={`${a.type}-${i}`}
+                style={[styles.alertBox, a.level === 'critical' && styles.alertBoxCritical]}
+              >
+                <Text style={styles.alertTitle}>
+                  {a.level === 'critical' ? '⛔ ' : '⚠️ '}{a.title}
+                </Text>
+                <Text style={styles.alertDesc}>{a.description}</Text>
+              </View>
+            ))}
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.riskScroll}
+            >
+              {climateRisk.decades.map((d, i) => {
+                const meta = riskLevelMeta(d.overall_level);
+                return (
+                  <View key={i} style={[styles.riskCard, d.is_past && styles.riskCardPast]}>
+                    <View style={styles.riskCardHeader}>
+                      <Text style={styles.riskCardLabel} numberOfLines={1}>{d.label}</Text>
+                      {d.is_past ? <Text style={styles.riskPastTag}>прошлый период</Text> : null}
+                    </View>
+                    <Text style={styles.riskCardPeriod}>{d.period}</Text>
+
+                    <View style={[styles.riskBadge, { backgroundColor: meta.bg }]}>
+                      <Text style={[styles.riskBadgeNum, { color: meta.color }]}>{d.overall_index}</Text>
+                      <Text style={[styles.riskBadgeLabel, { color: meta.color }]}>{meta.label} индекс</Text>
+                    </View>
+
+                    <RiskMiniBar label="🏜 Засуха" value={d.drought_index} color="#CA8A04" />
+                    <RiskMiniBar label="🌬 Суховей" value={d.sukhovey_index} color="#EA580C" />
+                    <RiskMiniBar label="❄️ Снег/мороз" value={d.early_snow_index} color="#2563EB" />
+
+                    <Text style={styles.riskFactors} numberOfLines={3}>
+                      {d.factors.join(' · ')}
+                    </Text>
+                  </View>
+                );
+              })}
+            </ScrollView>
+
+            <Text style={styles.riskSource}>Источник: {climateRisk.source}. Индекс 0–100 — пороговая оценка, не вероятность события.</Text>
+          </Card>
+        </>
+      )}
+
       {/* ── 4. MAP ─────────────────────────────────────────────── */}
       <SectionLabel title="КАРТА УЧАСТКА" />
+      {zonesData?.status === 'ready' && (
+        <Text style={styles.pendingText}>
+          {zonesData.stale ? 'Сохранённая сетка. ' : ''}
+          Период {zonesData.observationDate ?? '—'} — {zonesData.periodEnd ?? '—'} · проверено {measurement(zonesData.coveragePercent, '%', 0)} площади. Устойчивость зон требует повторных наблюдений.
+        </Text>
+      )}
       <View style={styles.segmentedWrap}>
         <SegTab label="Зоны риска" active={mapMode === 'zones'} onPress={() => setMapMode('zones')} />
-        <SegTab label="NDVI-снимок" active={mapMode === 'satellite'} onPress={() => setMapMode('satellite')} />
+        <SegTab label="Сетка NDVI" active={mapMode === 'satellite'} onPress={() => setMapMode('satellite')} />
         <SegTab label="Контур" active={mapMode === 'boundary'} onPress={() => setMapMode('boundary')} />
       </View>
 
@@ -653,7 +982,7 @@ export default function FieldScreen() {
             {mapMode === 'zones'
               ? 'Sentinel-2 · кластеры аномалий'
               : mapMode === 'satellite'
-              ? (zonesData?.ndviGrid.length ? `NDVI-снимок · ${zonesData.ndviGrid.length} ячеек` : 'Ожидание снимка Sentinel-2')
+              ? (zonesData?.ndviGrid.length ? `Сетка NDVI · ${zonesData.ndviGrid.length} ячеек` : 'Ожидание данных Sentinel-2')
               : 'Кадастровый контур участка'}
           </Text>
         </View>
@@ -716,7 +1045,7 @@ export default function FieldScreen() {
                 </View>
                 <View style={styles.vertDiv} />
                 <View style={styles.zoneMetricCell}>
-                  <Text style={styles.zoneMetricVal}>{selectedZone.ndmiDeficit.toFixed(2)}</Text>
+                  <Text style={styles.zoneMetricVal}>{selectedZone.ndmiDeficit?.toFixed(2) ?? '—'}</Text>
                   <Text style={styles.zoneMetricLabel}>Δ NDMI влага</Text>
                 </View>
               </View>
@@ -771,15 +1100,15 @@ export default function FieldScreen() {
               />
               <View style={styles.hairline} />
               <InfoRow
-                label="Экономия выездов"
-                value={`~${(zonesData.benchmark.economicScouting.estimatedSeasonSavingsKzt / 1000).toFixed(0)} тыс ₸/сезон`}
-                valueColor={colors.success}
+                label="Проверено площади"
+                value={measurement(zonesData.coveragePercent, '%', 0)}
               />
               <View style={styles.hairline} />
               <InfoRow
                 label="Источник данных"
                 value={zonesData.dataSource ?? zonesData.satelliteMission}
               />
+              <InfoRow label="Период сетки" value={`${zonesData.observationDate ?? '—'} — ${zonesData.periodEnd ?? '—'}`} />
             </Card>
           )}
         </>
@@ -806,6 +1135,11 @@ export default function FieldScreen() {
         <ActionRow
           title="Редактировать контур и метраж"
           onPress={() => router.push({ pathname: '/field/new', params: { fieldId: field.id, profileId: field.profileId } })}
+        />
+        <View style={styles.hairline} />
+        <ActionRow
+          title="История фактической урожайности"
+          onPress={() => router.push({ pathname: '/field/[id]/yield-history', params: { id: field.id } })}
         />
         <View style={styles.hairline} />
         <ActionRow title="Скачать GeoJSON для QGIS" onPress={() => void openExport('geojson')} />
@@ -863,7 +1197,8 @@ export default function FieldScreen() {
           ))}
         </Card>
       )}
-    </Screen>
+      </Screen>
+    </View>
   );
 }
 
@@ -906,6 +1241,31 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   loadingText: { fontFamily: fontFamilies.medium, fontSize: 13, color: colors.textSecondary },
+  refreshingOverlay: {
+    position: 'absolute',
+    top: 8,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 20,
+  },
+  refreshingChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  refreshingText: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.primaryDark },
   errTitle: { fontFamily: fontFamilies.semiBold, fontSize: 15, color: colors.danger },
   errText: { fontFamily: fontFamilies.regular, fontSize: 13, color: colors.textSecondary, textAlign: 'center' },
   retryBtn: { backgroundColor: colors.primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, marginTop: 6 },
@@ -971,6 +1331,8 @@ const styles = StyleSheet.create({
   },
   satObsText: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary, flex: 1 },
   satObsCloud: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.muted },
+  relBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  relBadgeText: { fontFamily: fontFamilies.semiBold, fontSize: 11 },
   anomalyBox: {
     margin: 10,
     marginTop: 0,
@@ -987,6 +1349,86 @@ const styles = StyleSheet.create({
   pendingZonesCard: { padding: 14, gap: 6 },
   pendingZonesTitle: { fontFamily: fontFamilies.semiBold, fontSize: 14, color: colors.text },
   dataSourceCard: { paddingHorizontal: 14, paddingVertical: 0 },
+
+  // Yield forecast
+  yieldCard: { padding: 0, gap: 0, overflow: 'hidden' },
+  yieldHero: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  yieldMain: { flex: 1.05, justifyContent: 'center' },
+  yieldValueRow: { flexDirection: 'row', alignItems: 'baseline', gap: 4 },
+  yieldValue: { fontFamily: fontFamilies.bold, fontSize: 30, color: colors.primaryDark },
+  yieldUnit: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.textSecondary },
+  yieldCaption: { fontFamily: fontFamilies.medium, fontSize: 11, color: colors.muted, marginTop: 2 },
+  yieldInterval: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingLeft: 12,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: colors.border,
+  },
+  yieldIntervalValue: { fontFamily: fontFamilies.bold, fontSize: 16, color: colors.text },
+  yieldIntervalLabel: { fontFamily: fontFamilies.medium, fontSize: 10.5, lineHeight: 14, color: colors.muted, marginTop: 3 },
+  yieldMetaRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 9, gap: 8 },
+  yieldMeta: { fontFamily: fontFamilies.medium, fontSize: 11.5, color: colors.textSecondary },
+  factorList: { paddingHorizontal: 14, paddingVertical: 4 },
+  factorRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 7, gap: 10 },
+  factorText: { flex: 1, minWidth: 0 },
+  factorLabel: { fontFamily: fontFamilies.semiBold, fontSize: 12.5, color: colors.text },
+  factorDetail: { fontFamily: fontFamilies.regular, fontSize: 10.5, color: colors.muted, marginTop: 1 },
+  factorValue: { fontFamily: fontFamilies.bold, fontSize: 12.5, textAlign: 'right' },
+  yieldDisclaimer: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 10.5,
+    lineHeight: 15,
+    color: colors.muted,
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+  },
+  yieldEmpty: { paddingHorizontal: 14, paddingVertical: 14, gap: 5 },
+  yieldEmptyTitle: { fontFamily: fontFamilies.semiBold, fontSize: 14, color: colors.text },
+  yieldEmptyText: { fontFamily: fontFamilies.regular, fontSize: 12.5, lineHeight: 18, color: colors.textSecondary },
+  yieldMissing: { fontFamily: fontFamilies.medium, fontSize: 11.5, lineHeight: 16, color: colors.muted },
+
+  // Sowing and harvest windows
+  operationsCard: { padding: 0, gap: 0, overflow: 'hidden' },
+  fieldStateRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
+  fieldStateText: { flex: 1, minWidth: 0, gap: 3 },
+  fieldStateTitle: { fontFamily: fontFamilies.semiBold, fontSize: 13.5, color: colors.text },
+  fieldStateDetail: { fontFamily: fontFamilies.regular, fontSize: 11.5, lineHeight: 16, color: colors.textSecondary },
+  ndviDeltaBox: { minWidth: 66, alignItems: 'flex-end' },
+  ndviDeltaValue: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.primaryDark },
+  ndviDeltaLabel: { fontFamily: fontFamilies.medium, fontSize: 9.5, color: colors.muted },
+  operationBlock: { paddingHorizontal: 14, paddingVertical: 12, gap: 8 },
+  operationHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  operationHeading: { flex: 1, minWidth: 0, gap: 2 },
+  operationTitle: { fontFamily: fontFamilies.bold, fontSize: 14, color: colors.text },
+  operationCalendar: { fontFamily: fontFamilies.regular, fontSize: 10.5, color: colors.muted },
+  bestWindowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  bestWindowDate: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.primaryDark },
+  bestWindowLabel: { fontFamily: fontFamilies.medium, fontSize: 10.5, color: colors.muted, marginTop: 2 },
+  windowScoreBox: { flexDirection: 'row', alignItems: 'baseline', gap: 3 },
+  windowScore: { fontFamily: fontFamilies.bold, fontSize: 18, color: colors.text },
+  windowScoreLabel: { fontFamily: fontFamilies.medium, fontSize: 10, color: colors.muted },
+  operationMetrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  operationMetric: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 10.5,
+    color: colors.textSecondary,
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+  },
+  operationFactors: { fontFamily: fontFamilies.medium, fontSize: 11.5, lineHeight: 16, color: '#166534' },
+  operationRisks: { fontFamily: fontFamilies.medium, fontSize: 11.5, lineHeight: 16, color: '#B45309' },
+  alternativeWindows: { fontFamily: fontFamilies.regular, fontSize: 10.5, lineHeight: 15, color: colors.muted },
+  operationSummary: { fontFamily: fontFamilies.regular, fontSize: 12.5, lineHeight: 18, color: colors.textSecondary },
+  operationsDisclaimer: { fontFamily: fontFamilies.regular, fontSize: 10.5, lineHeight: 15, color: colors.muted, paddingHorizontal: 14, paddingVertical: 10 },
 
   // Weather card
   weatherCard: { padding: 0, gap: 0, overflow: 'hidden' },
@@ -1011,6 +1453,58 @@ const styles = StyleSheet.create({
   },
   alertTitle: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: '#92400E' },
   alertDesc: { fontFamily: fontFamilies.regular, fontSize: 12, color: '#78350F', lineHeight: 17, marginTop: 2 },
+  alertBoxCritical: { backgroundColor: '#FEE2E2', borderColor: '#DC2626' },
+
+  // Climate risk by decades (задача 2.2)
+  riskSummary: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 13,
+    color: colors.text,
+    lineHeight: 19,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  riskScroll: { paddingHorizontal: 10, paddingVertical: 8, gap: 10 },
+  riskCard: {
+    width: 210,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    padding: 12,
+    marginRight: 10,
+  },
+  riskCardPast: { opacity: 0.6 },
+  riskCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  riskCardLabel: { fontFamily: fontFamilies.semiBold, fontSize: 13, color: colors.text, flex: 1 },
+  riskPastTag: { fontFamily: fontFamilies.medium, fontSize: 10, color: colors.muted },
+  riskCardPeriod: { fontFamily: fontFamilies.regular, fontSize: 11, color: colors.textSecondary, marginTop: 1 },
+  riskBadge: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 6,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: 8,
+  },
+  riskBadgeNum: { fontFamily: fontFamilies.bold, fontSize: 20 },
+  riskBadgeLabel: { fontFamily: fontFamilies.semiBold, fontSize: 12 },
+  riskFactors: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+    marginTop: 8,
+  },
+  riskSource: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 10,
+    color: colors.muted,
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+  },
 
   // Map
   segmentedWrap: {

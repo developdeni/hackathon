@@ -1,129 +1,82 @@
+from copy import deepcopy
 from datetime import datetime, timezone
+import math
 from typing import Any
 import httpx
 
+_cache: dict[tuple[float, float], dict[str, Any]] = {}
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
+
 
 async def get_field_agro_weather(latitude: float, longitude: float) -> dict[str, Any]:
-    """Получение погодного агроконтекста через Open-Meteo (без API-ключей)."""
-    url = "https://api.open-meteo.com/v1/forecast"
+    key = (round(latitude, 5), round(longitude, 5))
     params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max,et0_fao_evapotranspiration",
+        "latitude": latitude, "longitude": longitude,
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,et0_fao_evapotranspiration",
         "current": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m",
-        "timezone": "Asia/Almaty",
-        "forecast_days": 7,
+        "timezone": "Asia/Almaty", "forecast_days": 7, "wind_speed_unit": "ms",
     }
-
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            response = await client.get(url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                return parse_open_meteo_response(data, latitude, longitude)
-    except Exception:
-        # При недоступности сети или таймауте возвращаем детерминированный локальный агрометеоконтекст
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            response.raise_for_status()
+            result = parse_open_meteo_response(response.json(), latitude, longitude)
+            if result["status"] == "ok":
+                _cache[key] = deepcopy(result)
+                return result
+    except (httpx.HTTPError, ValueError, TypeError):
         pass
-
+    if key in _cache:
+        return {**deepcopy(_cache[key]), "status": "cached", "message": "Сохранённый прогноз: обновление недоступно. Проверьте дату."}
     return fallback_weather_context(latitude, longitude)
 
 
 def parse_open_meteo_response(data: dict[str, Any], lat: float, lon: float) -> dict[str, Any]:
-    current = data.get("current", {})
-    daily = data.get("daily", {})
-
-    temp_now = current.get("temperature_2m", 16.5)
-    humidity_now = current.get("relative_humidity_2m", 45)
-    wind_now = current.get("wind_speed_10m", 5.2)
-
-    temp_max_list = daily.get("temperature_2m_max", [18.0] * 7)
-    temp_min_list = daily.get("temperature_2m_min", [6.0] * 7)
-    precip_list = daily.get("precipitation_sum", [0.0] * 7)
-    et0_list = daily.get("et0_fao_evapotranspiration", [3.5] * 7)
-
-    # Сумма эффективных температур (GDD), база 5°C — реальный агроклиматический показатель
-    # накопления тепла для яровых культур за период прогноза.
-    gdd_sum = round(
-        sum(max(((tmax + tmin) / 2) - 5.0, 0.0) for tmax, tmin in zip(temp_max_list, temp_min_list)),
-        1,
-    )
-
-    # Оценка агроклиматических рисков
+    current, daily = data.get("current") or {}, data.get("daily") or {}
+    dates = daily.get("time") or []
+    def values(name: str) -> list[float] | None:
+        raw = daily.get(name) or []
+        if not dates or len(raw) != len(dates) or any(_number(v) is None for v in raw):
+            return None
+        return list(map(float, raw))
+    maxima, minima = values("temperature_2m_max"), values("temperature_2m_min")
+    precipitation, evaporation = values("precipitation_sum"), values("et0_fao_evapotranspiration")
+    total_rain = round(sum(precipitation), 1) if precipitation is not None else None
+    total_et0 = round(sum(evaporation), 1) if evaporation is not None else None
+    minimum = min(minima) if minima else None
     alerts = []
-    min_temp_7d = min(temp_min_list) if temp_min_list else 5.0
-    max_temp_7d = max(temp_max_list) if temp_max_list else 22.0
-    precip_7d = sum(precip_list) if precip_list else 0.0
-
-    if min_temp_7d <= 1.0:
-        alerts.append({
-            "type": "frost",
-            "level": "warning" if min_temp_7d > 0 else "critical",
-            "title": "Угроза заморозков",
-            "description": f"Прогнозируется понижение температуры до {min_temp_7d:.1f}°C в ночные часы.",
-        })
-
-    if max_temp_7d >= 28.0 and humidity_now < 30 and wind_now > 7.0:
-        alerts.append({
-            "type": "dry_wind",
-            "level": "warning",
-            "title": "Риск суховея",
-            "description": "Сочетание высокой температуры, низкой влажности воздуха и ветра ускоряет потерю влаги растениями.",
-        })
-
-    if precip_7d < 3.0 and sum(et0_list) > 15.0:
-        alerts.append({
-            "type": "moisture_deficit",
-            "level": "moderate",
-            "title": "Дефицит атмосферных осадков",
-            "description": f"Ожидается всего {precip_7d:.1f} мм осадков за 7 дней при испаряемости {sum(et0_list):.1f} мм.",
-        })
-
+    if minimum is not None and minimum <= 1:
+        alerts.append({"type": "frost", "level": "critical" if minimum <= 0 else "warning", "title": "Риск заморозков по прогнозу", "description": f"Минимум температуры в прогнозе: {minimum:.1f}°C."})
+    if total_rain is not None and total_et0 is not None and total_rain < 3 and total_et0 > 15:
+        alerts.append({"type": "moisture_deficit", "level": "moderate", "title": "Отрицательный прогнозный водный баланс", "description": f"Осадки {total_rain:.1f} мм, ET₀ {total_et0:.1f} мм. Это погодная оценка, не измерение влажности почвы."})
+    temperature = _number(current.get("temperature_2m"))
     return {
-        "status": "ok",
-        "source": "Open-Meteo (ECMWF/ERA5)",
+        "status": "ok" if temperature is not None or maxima else "unavailable",
+        "source": "Open-Meteo · модельный прогноз (best_match)",
         "coordinates": {"latitude": lat, "longitude": lon},
         "updatedAt": datetime.now(timezone.utc).isoformat(),
-        "current": {
-            "temperature": temp_now,
-            "humidity": humidity_now,
-            "windSpeed": wind_now,
-        },
+        "observedAt": current.get("time"), "timezone": data.get("timezone", "Asia/Almaty"),
+        "forecastStart": dates[0] if dates else None, "forecastEnd": dates[-1] if dates else None,
+        "current": {"temperature": temperature, "humidity": _number(current.get("relative_humidity_2m")), "windSpeed": _number(current.get("wind_speed_10m"))},
         "forecast7d": {
-            "maxTemp": max_temp_7d,
-            "minTemp": min_temp_7d,
-            "precipSum": round(precip_7d, 1),
-            "evapotranspiration": round(sum(et0_list), 1),
-            "gddSum": gdd_sum,
+            "maxTemp": max(maxima) if maxima else None, "minTemp": minimum,
+            "precipSum": total_rain, "evapotranspiration": total_et0,
+            "waterBalance": round(total_rain - total_et0, 1) if total_rain is not None and total_et0 is not None else None,
+            "gddSum": round(sum(max((hi + lo) / 2 - 5, 0) for hi, lo in zip(maxima, minima)), 1) if maxima and minima else None,
         },
         "alerts": alerts,
     }
 
 
 def fallback_weather_context(lat: float, lon: float) -> dict[str, Any]:
-    """Резервный погодный контекст для Акмолинской области (Кокшетау) при слабом интернете."""
     return {
-        "status": "cached",
-        "source": "Open-Meteo Reanalysis (Offline)",
-        "coordinates": {"latitude": lat, "longitude": lon},
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-        "current": {
-            "temperature": 17.2,
-            "humidity": 42,
-            "windSpeed": 5.8,
-        },
-        "forecast7d": {
-            "maxTemp": 21.4,
-            "minTemp": 4.1,
-            "precipSum": 1.2,
-            "evapotranspiration": 22.8,
-            "gddSum": 55.3,
-        },
-        "alerts": [
-            {
-                "type": "moisture_deficit",
-                "level": "moderate",
-                "title": "Умеренный дефицит влаги",
-                "description": "Низкий уровень осадков за последние 10 дней в сочетании с ветровой нагрузкой.",
-            }
-        ],
+        "status": "unavailable", "source": "Open-Meteo",
+        "message": "Погода недоступна. Подтверждённого сохранённого прогноза для этого поля нет.",
+        "coordinates": {"latitude": lat, "longitude": lon}, "updatedAt": None,
+        "current": {"temperature": None, "humidity": None, "windSpeed": None},
+        "forecast7d": {"maxTemp": None, "minTemp": None, "precipSum": None, "evapotranspiration": None, "gddSum": None, "waterBalance": None},
+        "alerts": [],
     }

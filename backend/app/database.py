@@ -68,6 +68,22 @@ def initialize_database() -> None:
                 status TEXT NOT NULL DEFAULT 'saved',
                 FOREIGN KEY (field_id) REFERENCES fields(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS yield_history (
+                id TEXT PRIMARY KEY NOT NULL,
+                field_id TEXT NOT NULL,
+                season_year INTEGER NOT NULL,
+                crop_type TEXT NOT NULL,
+                yield_t_ha REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'farm_record',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(field_id, season_year),
+                FOREIGN KEY (field_id) REFERENCES fields(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_yield_history_field_year
+            ON yield_history(field_id, season_year DESC);
             """
         )
 
@@ -163,4 +179,17 @@ def inspection_from_row(row: sqlite3.Row, base_url: str) -> dict[str, Any]:
         "latitude": row["latitude"],
         "longitude": row["longitude"],
         "status": row["status"],
+    }
+
+
+def yield_history_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "fieldId": row["field_id"],
+        "seasonYear": row["season_year"],
+        "cropType": row["crop_type"],
+        "yieldTPerHa": row["yield_t_ha"],
+        "source": row["source"],
+        "notes": row["notes"],
+        "createdAt": row["created_at"],
     }

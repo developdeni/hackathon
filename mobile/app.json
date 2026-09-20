@@ -55,6 +55,10 @@
           "locationWhenInUsePermission": "Разрешите сохранить координаты осмотра поля."
         }
       ]
+    ],
+    "assetBundlePatterns": [
+      "assets/**"
     ]
+
   }
 }

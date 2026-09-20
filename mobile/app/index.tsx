@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  FlatList,
   Image,
-  ImageStyle,
+  Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,8 +15,10 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { SymbolView, type SFSymbol } from 'expo-symbols';
 import * as ImagePicker from 'expo-image-picker';
+import { readAsStringAsync } from 'expo-file-system/legacy';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import { SymbolView, type SFSymbol } from 'expo-symbols';
 
 import { Text } from '../src/components/AppText';
 import { Avatar } from '../src/components/Avatar';
@@ -29,19 +34,63 @@ import {
   syncOfflineQueue,
   CACHE_KEYS,
   diagnoseCropPhoto,
+  countSeedlingsPhoto,
+  countSeedlingsVideoFrames,
+  analyzeGrainQuality,
+  countLivestock,
   askAiAgronomist,
+  loadAiChatHistory,
+  saveAiChatHistory,
+  clearAiChatHistory,
 } from '../src/services/api';
-import {
-  clearLocalChatHistory,
-  loadSavedChatMessages,
-  saveChatMessages,
-} from '../src/services/localAiModel';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
-import { AiDiagnosisResult, FarmProfile, Field } from '../src/types/domain';
+import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage } from '../src/types/domain';
 
 type TabKey = 'ai_tools' | 'fields' | 'profile';
+
+/* Typing dots animation component */
+function TypingDots() {
+  const dot1 = useRef(new Animated.Value(0.3)).current;
+  const dot2 = useRef(new Animated.Value(0.3)).current;
+  const dot3 = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    const animate = (dot: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
+          Animated.timing(dot, { toValue: 0.3, duration: 300, useNativeDriver: true }),
+        ])
+      );
+    const a1 = animate(dot1, 0);
+    const a2 = animate(dot2, 200);
+    const a3 = animate(dot3, 400);
+    a1.start();
+    a2.start();
+    a3.start();
+    return () => { a1.stop(); a2.stop(); a3.stop(); };
+  }, [dot1, dot2, dot3]);
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4 }}>
+      {[dot1, dot2, dot3].map((dot, i) => (
+        <Animated.View
+          key={i}
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 3.5,
+            backgroundColor: colors.primaryDark,
+            opacity: dot,
+          }}
+        />
+      ))}
+    </View>
+  );
+}
 
 export default function MainScreen() {
   const router = useRouter();
@@ -51,6 +100,8 @@ export default function MainScreen() {
 
   // AI Tools opens by default as requested
   const [activeTab, setActiveTab] = useState<TabKey>(params.tab ?? 'ai_tools');
+  // AI Tools sub-screens (chat/photo) go full-screen — hide the bottom nav there.
+  const [aiImmersive, setAiImmersive] = useState(false);
 
   // Instant hydration from fast memory cache (0ms perceived latency)
   const initialProfiles = getMemoryCache<FarmProfile[]>(CACHE_KEYS.PROFILES) ?? [];
@@ -204,9 +255,17 @@ export default function MainScreen() {
     <SafeAreaView style={styles.safeContainer} edges={['top']}>
       {/* Tab content */}
       <View style={styles.tabContentArea}>
-        {activeTab === 'ai_tools' && (
-          <AiToolsView onNavigateToFields={() => setActiveTab('fields')} />
-        )}
+        {/* AI Tools stays mounted (hidden, not unmounted) so an in-flight request
+            and the chat state survive switching to another tab and back. */}
+        <View
+          style={[styles.tabPane, activeTab !== 'ai_tools' && styles.tabPaneHidden]}
+          pointerEvents={activeTab === 'ai_tools' ? 'auto' : 'none'}
+        >
+          <AiToolsView
+            onNavigateToFields={() => setActiveTab('fields')}
+            onImmersiveChange={setAiImmersive}
+          />
+        </View>
 
         {activeTab === 'fields' && (
           <FieldsView
@@ -241,7 +300,8 @@ export default function MainScreen() {
         )}
       </View>
 
-      {/* STANDARD NATIVE IOS BOTTOM NAVIGATION BAR */}
+      {/* STANDARD NATIVE IOS BOTTOM NAVIGATION BAR — hidden inside AI sub-screens */}
+      {!(activeTab === 'ai_tools' && aiImmersive) && (
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
         <Pressable
           onPress={() => setActiveTab('ai_tools')}
@@ -300,385 +360,1583 @@ export default function MainScreen() {
           </Text>
         </Pressable>
       </View>
+      )}
     </SafeAreaView>
   );
 }
 
 /* =========================================================================
-   1. AI TOOLS VIEW (AI-Агроном: Компьютерное зрение и экспертные консультации)
+   1. AI TOOLS VIEW (Gemini Vision Diagnosis + Agronomic Advisor Chat)
    ========================================================================= */
-function AiToolsView({ onNavigateToFields }: { onNavigateToFields: () => void }) {
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
-  const [diagnosis, setDiagnosis] = useState<AiDiagnosisResult | null>(null);
-  const [chatInput, setChatInput] = useState('');
-  const [sendingChat, setSendingChat] = useState(false);
-  const [messages, setMessages] = useState<Array<{ id: string; sender: 'user' | 'ai'; text: string; time: string }>>([
-    {
-      id: 'm1',
-      sender: 'ai',
-      text: 'Здравствуйте! Я Tanap AI — агрономический ассистент на базе модели Hugging Face CropGuard. Модель скачана и вшита в приложение, работает на 100% офлайн без интернета. Сделайте фото листа для детекции болезней или задайте вопрос по нормам высева, удобрениям и индексам NDVI!',
-      time: '00:00',
-    },
-  ]);
 
+type AiViewMode = 'menu' | 'photo' | 'count' | 'grain' | 'livestock' | 'chat';
+
+function speciesEmoji(nameEn?: string): string {
+  switch (nameEn) {
+    case 'cattle': return '🐄';
+    case 'sheep': return '🐑';
+    case 'goat': return '🐐';
+    case 'horse': return '🐎';
+    case 'pig': return '🐖';
+    case 'camel': return '🐪';
+    case 'poultry': return '🐔';
+    case 'buffalo': return '🐃';
+    default: return '🐾';
+  }
+}
+
+// Метаданные категории диагностики: подпись, эмодзи, цвет и подпись строки СЗР.
+function getDiagCategoryMeta(category?: string): {
+  label: string;
+  emoji: string;
+  color: string;
+  bg: string;
+  chemLabel: string;
+} {
+  switch (category) {
+    case 'pest':
+      return { label: 'Вредитель', emoji: '🐛', color: '#B45309', bg: '#FEF3C7', chemLabel: '🐛 Инсектицид:' };
+    case 'weed':
+      return { label: 'Сорняк', emoji: '🌿', color: '#3F6212', bg: '#ECFCCB', chemLabel: '🌿 Гербицид:' };
+    case 'healthy':
+      return { label: 'Здоровое растение', emoji: '✅', color: '#166534', bg: '#DCFCE7', chemLabel: '💊 Профилактика:' };
+    case 'none':
+      return { label: 'Не распознано', emoji: '❓', color: '#6B7280', bg: '#F3F4F6', chemLabel: '💊 Препараты:' };
+    default:
+      return { label: 'Болезнь', emoji: '🦠', color: '#9D174D', bg: '#FCE7F3', chemLabel: '💊 Фунгицид:' };
+  }
+}
+
+// iOS AVAssetImageGenerator может зависнуть на некоторых видео (не резолвит и не реджектит).
+// Оборачиваем извлечение кадра в гонку с таймаутом, чтобы UI НИКОГДА не завис навсегда.
+async function extractVideoFrame(uri: string, timeMs: number, timeoutMs = 7000): Promise<string | null> {
+  try {
+    const thumb = await Promise.race([
+      VideoThumbnails.getThumbnailAsync(uri, { time: timeMs, quality: 0.6 }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+    if (!thumb || !('uri' in thumb)) return null;
+    return await readAsStringAsync(thumb.uri, { encoding: 'base64' });
+  } catch {
+    return null;
+  }
+}
+
+function getStandRatingMeta(rating?: string): {
+  label: string;
+  emoji: string;
+  color: string;
+  bg: string;
+} {
+  switch (rating) {
+    case 'sparse':
+      return { label: 'Ниже ориентира', emoji: '🔻', color: '#B45309', bg: '#FEF3C7' };
+    case 'dense':
+      return { label: 'Выше ориентира', emoji: '🔺', color: '#9D174D', bg: '#FCE7F3' };
+    case 'optimal':
+      return { label: 'В ориентире', emoji: '✅', color: '#166534', bg: '#DCFCE7' };
+    default:
+      return { label: 'Не определено', emoji: '❓', color: '#6B7280', bg: '#F3F4F6' };
+  }
+}
+
+function getGrainRatingMeta(rating?: string): {
+  label: string;
+  emoji: string;
+  color: string;
+  bg: string;
+} {
+  switch (rating) {
+    case 'good':
+      return { label: 'Визуально чистая', emoji: '✅', color: '#166534', bg: '#DCFCE7' };
+    case 'acceptable':
+      return { label: 'Видимая примесь', emoji: '⚠️', color: '#B45309', bg: '#FEF3C7' };
+    case 'poor':
+      return { label: 'Высокая засорённость', emoji: '⛔', color: '#9D174D', bg: '#FCE7F3' };
+    default:
+      return { label: 'Не определено', emoji: '❓', color: '#6B7280', bg: '#F3F4F6' };
+  }
+}
+
+function AiToolsView({
+  onNavigateToFields,
+  onImmersiveChange,
+}: {
+  onNavigateToFields: () => void;
+  onImmersiveChange: (immersive: boolean) => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [viewMode, setViewMode] = useState<AiViewMode>('menu');
+
+  // Chat/photo are full-screen sub-screens — tell the parent to hide the bottom nav.
   useEffect(() => {
-    let active = true;
-    loadSavedChatMessages().then((saved) => {
-      if (active && saved && saved.length > 0) {
-        setMessages(
-          saved.map((s) => ({
-            id: s.id,
-            sender: s.sender,
-            text: s.text,
-            time: s.timestamp || '00:00',
-          }))
-        );
-      }
-    });
+    onImmersiveChange(viewMode !== 'menu');
+  }, [viewMode, onImmersiveChange]);
+
+  // Photo diagnosis state
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<AiDiagnosisResult | null>(null);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
+
+  // Задача 3.2 — подсчёт всходов / густота стояния
+  const [countPhotoUri, setCountPhotoUri] = useState<string | null>(null);
+  const [countIsVideo, setCountIsVideo] = useState(false);
+  const [isCounting, setIsCounting] = useState(false);
+  const [standResult, setStandResult] = useState<AiStandCountResult | null>(null);
+  const [countError, setCountError] = useState<string | null>(null);
+  const [standAreaText, setStandAreaText] = useState('');
+
+  // Задача 3.3 — контроль качества зерна по фото пробы
+  const [grainPhotoUri, setGrainPhotoUri] = useState<string | null>(null);
+  const [isGrainAnalyzing, setIsGrainAnalyzing] = useState(false);
+  const [grainResult, setGrainResult] = useState<AiGrainQualityResult | null>(null);
+  const [grainError, setGrainError] = useState<string | null>(null);
+
+  // Задача 3.4 — подсчёт поголовья скота
+  const [herdPhotoUri, setHerdPhotoUri] = useState<string | null>(null);
+  const [isHerdAnalyzing, setIsHerdAnalyzing] = useState(false);
+  const [herdResult, setHerdResult] = useState<AiLivestockResult | null>(null);
+  const [herdError, setHerdError] = useState<string | null>(null);
+  const countRequestId = useRef(0);
+
+  // Agronomic chat state
+  const [messages, setMessages] = useState<AiChatMessage[]>([]);
+  const [inputText, setInputText] = useState('');
+  const [isAnswering, setIsAnswering] = useState(false);
+  const chatListRef = useRef<FlatList<AiChatMessage>>(null);
+  const inputRef = useRef<TextInput>(null);
+
+  // Track keyboard height directly — deterministic lift of the input above the keyboard
+  // (more reliable than KeyboardAvoidingView with a nested layout + hidden tab bar).
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, (e) => setKbHeight(e.endCoordinates?.height ?? 0));
+    const hide = Keyboard.addListener(hideEvt, () => setKbHeight(0));
     return () => {
-      active = false;
+      show.remove();
+      hide.remove();
     };
   }, []);
 
-  async function handleClearChat() {
-    await clearLocalChatHistory();
-    const welcome = {
-      id: `m_${Date.now()}`,
-      sender: 'ai' as const,
-      text: 'Диалог очищен. Задайте любой агрономический вопрос или отправьте фото листа!',
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    setMessages([welcome]);
-  }
-
-  async function takePhoto() {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Доступ ограничен', 'Разрешите доступ к камере в настройках устройства.');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      quality: 0.82,
-      base64: true,
-    });
-    if (!result.canceled && result.assets[0]) {
-      const asset = result.assets[0];
-      setPhotoUri(asset.uri);
-      if (asset.base64) {
-        void runVisionDiagnosis(asset.base64);
+  // Load saved chat on mount
+  useEffect(() => {
+    void (async () => {
+      const saved = await loadAiChatHistory();
+      if (saved && saved.length > 0) {
+        setMessages(saved);
+      } else {
+        setMessages([
+          {
+            id: 'welcome',
+            sender: 'ai',
+            text: 'Здравствуйте! Я — AI-агроном Tanap AI 🌾\n\nСфотографируйте лист, вредителя или сорняк — распознаю болезни, вредителей и сорняки и дам рекомендации по обработке. Или задайте вопрос по агрономии Северного Казахстана.',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
       }
-    }
-  }
+    })();
+  }, []);
 
-  async function pickPhoto() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Доступ ограничен', 'Разрешите доступ к медиатеке в настройках устройства.');
-      return;
+  // Auto-scroll when messages change or the keyboard opens (keeps latest reply visible).
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => {
+        chatListRef.current?.scrollToEnd({ animated: true });
+      }, 150);
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 0.82,
-      base64: true,
-    });
-    if (!result.canceled && result.assets[0]) {
-      const asset = result.assets[0];
-      setPhotoUri(asset.uri);
-      if (asset.base64) {
-        void runVisionDiagnosis(asset.base64);
-      }
-    }
-  }
+  }, [messages.length, isAnswering, kbHeight]);
 
-  async function runVisionDiagnosis(base64: string) {
-    setAnalyzingPhoto(true);
-    setDiagnosis(null);
+  const handlePickPhoto = async (fromCamera: boolean) => {
     try {
-      const res = await diagnoseCropPhoto(base64);
-      setDiagnosis(res);
-    } catch (e) {
-      Alert.alert('Ошибка анализа', e instanceof Error ? e.message : 'Не удалось распознать снимок');
-    } finally {
-      setAnalyzingPhoto(false);
-    }
-  }
+      setDiagnosisError(null);
+      const permission = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
 
-  async function sendMessage(textToSend?: string) {
-    const query = (textToSend ?? chatInput).trim();
-    if (!query || sendingChat) return;
-
-    const userTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const userMsg = {
-      id: `u_${Date.now()}`,
-      sender: 'user' as const,
-      text: query,
-      time: userTime,
-    };
-    setMessages((prev) => {
-      const next = [...prev, userMsg];
-      void saveChatMessages(
-        next.map((m) => ({
-          id: m.id,
-          sender: m.sender,
-          text: m.text,
-          timestamp: m.time,
-        }))
-      );
-      return next;
-    });
-    setChatInput('');
-    setSendingChat(true);
-
-    try {
-      const ans = await askAiAgronomist(query);
-      const aiTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const aiMsg = {
-        id: `ai_${Date.now()}`,
-        sender: 'ai' as const,
-        text: ans,
-        time: aiTime,
-      };
-      setMessages((prev) => {
-        const next = [...prev, aiMsg];
-        void saveChatMessages(
-          next.map((m) => ({
-            id: m.id,
-            sender: m.sender,
-            text: m.text,
-            timestamp: m.time,
-          }))
+      if (!permission.granted) {
+        Alert.alert(
+          'Доступ ограничен',
+          fromCamera
+            ? 'Для фотофиксации требуется доступ к камере устройства.'
+            : 'Для выбора снимка требуется доступ к галерее.'
         );
-        return next;
-      });
-    } catch {
-      const errMsg = {
-        id: `ai_${Date.now()}`,
-        sender: 'ai' as const,
-        text: 'Не удалось сформировать ответ. Повторите запрос.',
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        return;
+      }
+
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 0.7,
+        base64: true,
       };
-      setMessages((prev) => [...prev, errMsg]);
-    } finally {
-      setSendingChat(false);
+
+      const result = fromCamera
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      setPhotoUri(asset.uri);
+      setViewMode('photo');
+
+      if (!asset.base64) {
+        setDiagnosisError('Не удалось прочитать данные фотографии.');
+        return;
+      }
+
+      setIsDiagnosing(true);
+      setDiagnosis(null);
+
+      try {
+        const diagResult = await diagnoseCropPhoto(asset.base64, asset.fileName || 'crop_leaf.jpg');
+        setDiagnosis(diagResult);
+      } catch (err: any) {
+        setDiagnosisError(err?.message || 'Не удалось выполнить диагностику снимка');
+      } finally {
+        setIsDiagnosing(false);
+      }
+    } catch (err: any) {
+      setDiagnosisError(err?.message || 'Ошибка выбора снимка');
     }
-  }
+  };
+
+  const handleAttachPress = () => {
+    Alert.alert('Фото для диагностики', 'Снимок листа, вредителя или сорняка:', [
+      { text: 'Сделать фото', onPress: () => void handlePickPhoto(true) },
+      { text: 'Выбрать из галереи', onPress: () => void handlePickPhoto(false) },
+      { text: 'Отмена', style: 'cancel' },
+    ]);
+  };
+
+  const handleClearPhoto = () => {
+    setPhotoUri(null);
+    setDiagnosis(null);
+    setDiagnosisError(null);
+    setViewMode('menu');
+  };
+
+  const handlePickCountPhoto = async (fromCamera: boolean) => {
+    try {
+      setCountError(null);
+      const normalizedArea = standAreaText.trim().replace(',', '.');
+      const calibratedArea = normalizedArea ? Number(normalizedArea) : undefined;
+      if (calibratedArea !== undefined && (!Number.isFinite(calibratedArea) || calibratedArea < 0.01 || calibratedArea > 10_000)) {
+        Alert.alert('Проверьте площадь', 'Введите площадь кадра от 0,01 до 10 000 м² или оставьте поле пустым.');
+        return;
+      }
+      const permission = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          'Доступ ограничен',
+          fromCamera
+            ? 'Для съёмки требуется доступ к камере устройства.'
+            : 'Для выбора снимка требуется доступ к галерее.'
+        );
+        return;
+      }
+
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images', 'videos'],
+        allowsEditing: false,
+        quality: 0.8,
+        base64: true,
+        videoMaxDuration: 20,
+      };
+
+      const result = fromCamera
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const isVideo = asset.type === 'video' || (asset.duration != null && asset.duration > 0);
+      setCountPhotoUri(asset.uri);
+      setCountIsVideo(isVideo);
+      setViewMode('count');
+
+      setIsCounting(true);
+      setStandResult(null);
+      const requestId = ++countRequestId.current;
+
+      try {
+        if (isVideo) {
+          // Быстрый путь: извлекаем 3 кадра на телефоне и шлём только их (в разы легче, чем весь ролик).
+          // asset.duration в миллисекундах; каждый кадр — с защитой от зависания AVAssetImageGenerator.
+          const durationMs = Math.max(asset.duration ?? 10_000, 1_000);
+          const times = [...new Set(
+            [0.2, 0.5, 0.8].map((r) => Math.min(Math.round(durationMs * r), Math.max(durationMs - 300, 0)))
+          )];
+          const frames: string[] = [];
+          for (const t of times) {
+            if (requestId !== countRequestId.current) return;
+            const frame = await extractVideoFrame(asset.uri, t);
+            if (frame) frames.push(frame);
+          }
+          if (frames.length === 0) {
+            if (requestId === countRequestId.current) {
+              setCountError('Не удалось извлечь кадры из видео. Попробуйте другой ролик (mp4) или снимите фото.');
+            }
+            return;
+          }
+          const res = await countSeedlingsVideoFrames(frames, asset.fileName || 'field_stand.mp4');
+          if (requestId === countRequestId.current) setStandResult(res);
+        } else {
+          if (!asset.base64) {
+            setCountError('Не удалось прочитать данные фотографии.');
+            return;
+          }
+          const res = await countSeedlingsPhoto(
+            asset.base64,
+            asset.fileName || 'field_stand.jpg',
+            calibratedArea
+          );
+          if (requestId === countRequestId.current) setStandResult(res);
+        }
+      } catch (err: any) {
+        if (requestId === countRequestId.current) {
+          setCountError(err?.message || 'Не удалось выполнить подсчёт всходов');
+        }
+      } finally {
+        if (requestId === countRequestId.current) setIsCounting(false);
+      }
+    } catch (err: any) {
+      setCountError(err?.message || 'Ошибка выбора материала');
+      setIsCounting(false);
+    }
+  };
+
+  const handleClearCount = () => {
+    countRequestId.current += 1;
+    setIsCounting(false);
+    setCountPhotoUri(null);
+    setCountIsVideo(false);
+    setStandResult(null);
+    setCountError(null);
+    setStandAreaText('');
+    setViewMode('menu');
+  };
+
+  const handlePickGrainPhoto = async (fromCamera: boolean) => {
+    try {
+      setGrainError(null);
+      const permission = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          'Доступ ограничен',
+          fromCamera
+            ? 'Для съёмки требуется доступ к камере устройства.'
+            : 'Для выбора снимка требуется доступ к галерее.'
+        );
+        return;
+      }
+
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.85,
+        base64: true,
+      };
+
+      const result = fromCamera
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      setGrainPhotoUri(asset.uri);
+      setViewMode('grain');
+
+      if (!asset.base64) {
+        setGrainError('Не удалось прочитать данные фотографии.');
+        return;
+      }
+
+      setIsGrainAnalyzing(true);
+      setGrainResult(null);
+
+      try {
+        const res = await analyzeGrainQuality(asset.base64, asset.fileName || 'grain_sample.jpg');
+        setGrainResult(res);
+      } catch (err: any) {
+        setGrainError(err?.message || 'Не удалось выполнить анализ зерна');
+      } finally {
+        setIsGrainAnalyzing(false);
+      }
+    } catch (err: any) {
+      setGrainError(err?.message || 'Ошибка выбора снимка');
+    }
+  };
+
+  const handleClearGrain = () => {
+    setGrainPhotoUri(null);
+    setGrainResult(null);
+    setGrainError(null);
+    setViewMode('menu');
+  };
+
+  const handlePickHerdPhoto = async (fromCamera: boolean) => {
+    try {
+      setHerdError(null);
+      const permission = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          'Доступ ограничен',
+          fromCamera
+            ? 'Для съёмки требуется доступ к камере устройства.'
+            : 'Для выбора снимка требуется доступ к галерее.'
+        );
+        return;
+      }
+
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.9, // выше качество — точнее подсчёт далёких/мелких животных
+        base64: true,
+      };
+
+      const result = fromCamera
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      setHerdPhotoUri(asset.uri);
+      setViewMode('livestock');
+
+      if (!asset.base64) {
+        setHerdError('Не удалось прочитать данные фотографии.');
+        return;
+      }
+
+      setIsHerdAnalyzing(true);
+      setHerdResult(null);
+
+      try {
+        const res = await countLivestock(asset.base64, asset.fileName || 'herd.jpg');
+        setHerdResult(res);
+      } catch (err: any) {
+        setHerdError(err?.message || 'Не удалось выполнить подсчёт поголовья');
+      } finally {
+        setIsHerdAnalyzing(false);
+      }
+    } catch (err: any) {
+      setHerdError(err?.message || 'Ошибка выбора снимка');
+    }
+  };
+
+  const handleClearHerd = () => {
+    setHerdPhotoUri(null);
+    setHerdResult(null);
+    setHerdError(null);
+    setViewMode('menu');
+  };
+
+  const handleAskAboutDiagnosis = () => {
+    if (!diagnosis) return;
+    const kind =
+      diagnosis.category === 'pest'
+        ? 'схема инсектицидной защиты'
+        : diagnosis.category === 'weed'
+        ? 'схема гербицидной обработки'
+        : 'схема фунгицидной защиты';
+    const object = diagnosis.object_name || diagnosis.diagnosis;
+    const visualShare = diagnosis.affected_area_percent != null
+      ? ` В кадре признаки занимают примерно ${diagnosis.affected_area_percent}% видимой растительной части.`
+      : '';
+    const prompt = `Какая ${kind} может рассматриваться для культуры «${diagnosis.crop}» при визуальных признаках «${object}» (${diagnosis.pathogen})?${visualShare} Укажи, что нужно проверить в поле до обработки.`;
+    setViewMode('chat');
+    handleSendMessage(prompt);
+  };
+
+  const handleSendMessage = async (textToSend?: string) => {
+    const q = (textToSend ?? inputText).trim();
+    if (!q || isAnswering) return;
+
+    Keyboard.dismiss();
+    setInputText('');
+    const userMsg: AiChatMessage = {
+      id: `user_${Date.now()}`,
+      sender: 'user',
+      text: q,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
+    void saveAiChatHistory(nextMessages);
+    setIsAnswering(true);
+
+    try {
+      // Only send last 10 messages as context to reduce payload and latency
+      const recentHistory = nextMessages.slice(-10);
+      const answer = await askAiAgronomist(q, recentHistory);
+      const aiMsg: AiChatMessage = {
+        id: `ai_${Date.now()}`,
+        sender: 'ai',
+        text: answer,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      const updatedMessages = [...nextMessages, aiMsg];
+      setMessages(updatedMessages);
+      void saveAiChatHistory(updatedMessages);
+    } catch (err: any) {
+      const errorMsg: AiChatMessage = {
+        id: `err_${Date.now()}`,
+        sender: 'ai',
+        text: `⚠️ ${err?.message || 'Сервер недоступен'}.\nПроверьте Wi-Fi и попробуйте ещё раз.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      const updatedMessages = [...nextMessages, errorMsg];
+      setMessages(updatedMessages);
+      void saveAiChatHistory(updatedMessages);
+    } finally {
+      setIsAnswering(false);
+    }
+  };
+
+  const handleClearHistory = () => {
+    Alert.alert('Очистить историю', 'Удалить переписку с AI-агрономом?', [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Очистить',
+        style: 'destructive',
+        onPress: () => {
+          void clearAiChatHistory();
+          setMessages([
+            {
+              id: 'welcome',
+              sender: 'ai',
+              text: 'Диалог очищен. Задайте новый вопрос или прикрепите фото для анализа.',
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+        },
+      },
+    ]);
+  };
 
   const quickQuestions = [
-    'Что делать при NDVI < 0.35?',
-    'Жёлтая ржавчина на пшенице',
-    'Септориоз листьев',
-    'Осот и вьюнок в поле',
-    'Сроки и нормы сева',
-    'Подкормка карбамидом',
+    '🌾 Норма высева пшеницы',
+    '🦠 Жёлтая ржавчина',
+    '🌿 Гербициды No-Till',
+    '🧪 Септориоз листьев',
+    '🌽 Сроки сева Акмолинская',
   ];
 
-  return (
-    <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-      {/* Title */}
-      <View style={styles.headerTitleBlock}>
-        <Text style={styles.screenTitle}>AI Агроном</Text>
-        <Text style={styles.screenSubtitle}>Компьютерное зрение и экспертные консультации</Text>
-        <View style={styles.modelStatusBadge}>
-          <View style={styles.modelStatusDot} />
-          <Text style={styles.modelStatusText}>Hugging Face CropGuard & Agro-SLM • 100% Офлайн</Text>
-        </View>
-      </View>
-
-      {/* 1. БЛОК РАСПОЗНАВАНИЯ ФОТО */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>ФОТОДИАГНОСТИКА БОЛЕЗНЕЙ И СОРНЯКОВ</Text>
-      </View>
-
-      <Card style={styles.aiPhotoCard}>
-        <View style={styles.aiPhotoHeader}>
-          <View style={styles.aiPhotoIconCircle}>
-            <AppIcon name="viewfinder" size={22} color={colors.primaryDark} />
-          </View>
-          <View style={styles.aiPhotoTextWrap}>
-            <Text style={styles.aiPhotoTitle}>Распознавание по фотографии</Text>
-            <Text style={styles.aiPhotoDescription}>
-              Сделайте снимок листа или очага в поле. Модель определит патоген, степень поражения и регламент обработки.
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.aiButtonsRow}>
-          <Pressable
-            disabled={analyzingPhoto}
-            onPress={takePhoto}
-            style={({ pressed }) => [styles.aiActionButton, pressed && styles.pressed]}
-          >
-            <AppIcon name="camera" size={16} color="#FFFFFF" />
-            <Text style={styles.aiActionButtonText}>Камера</Text>
-          </Pressable>
-
-          <Pressable
-            disabled={analyzingPhoto}
-            onPress={pickPhoto}
-            style={({ pressed }) => [styles.aiSecondaryActionButton, pressed && styles.pressed]}
-          >
-            <AppIcon name="photo" size={16} color={colors.text} />
-            <Text style={styles.aiSecondaryActionButtonText}>Медиатека</Text>
-          </Pressable>
-        </View>
-
-        {analyzingPhoto && (
-          <View style={styles.analyzingBox}>
-            <ActivityIndicator size="small" color={colors.primaryDark} />
-            <Text style={styles.analyzingText}>Нейросетевой спектральный анализ листа…</Text>
+  // ── Chat Message Renderer ──
+  const renderMessage = useCallback(({ item: msg }: { item: AiChatMessage }) => {
+    const isUser = msg.sender === 'user';
+    const isError = msg.id.startsWith('err_');
+    return (
+      <View
+        style={[
+          styles.aiMessageWrap,
+          isUser ? styles.aiMessageWrapUser : styles.aiMessageWrapAi,
+        ]}
+      >
+        {!isUser && (
+          <View style={styles.aiAvatarSmall}>
+            <Text style={{ fontSize: 14 }}>🌱</Text>
           </View>
         )}
-
-        {/* Результат распознавания */}
-        {diagnosis && photoUri && (
-          <View style={styles.diagnosisCard}>
-            <View style={styles.diagnosisTopRow}>
-              <Image source={{ uri: photoUri }} style={styles.diagnosisThumb as ImageStyle} />
-              <View style={styles.diagnosisInfo}>
-                <View style={styles.diagnosisBadgeRow}>
-                  <Badge
-                    label={
-                      diagnosis.severity === 'high'
-                        ? 'Высокий риск'
-                        : diagnosis.severity === 'moderate'
-                        ? 'Умеренный риск'
-                        : 'В норме'
-                    }
-                    variant={
-                      diagnosis.severity === 'high'
-                        ? 'danger'
-                        : diagnosis.severity === 'moderate'
-                        ? 'warning'
-                        : 'success'
-                    }
-                  />
-                  <Text style={styles.confidenceText}>
-                    {(diagnosis.confidence * 100).toFixed(0)}% уверенность
-                  </Text>
-                </View>
-                <Text style={styles.diagnosisTitle}>{diagnosis.diagnosis}</Text>
-                <Text style={styles.diagnosisCrop}>
-                  Культура: {diagnosis.crop} • Поражение: {diagnosis.affected_area_percent}%
-                </Text>
-                {diagnosis.pathogen && (
-                  <Text style={styles.diagnosisPathogen}>Патоген: {diagnosis.pathogen}</Text>
-                )}
-              </View>
-            </View>
-
-            <View style={styles.diagnosisDivider} />
-
-            {/* Рекомендации и химия */}
-            <View style={styles.prescriptionBlock}>
-              <Text style={styles.prescriptionLabel}>РЕКОМЕНДОВАННЫЙ РЕГЛАМЕНТ:</Text>
-              <Text style={styles.prescriptionText}>• {diagnosis.recommendation}</Text>
-              {diagnosis.chemicals !== '—' && (
-                <Text style={styles.prescriptionText}>• СЗР: {diagnosis.chemicals} ({diagnosis.rate})</Text>
-              )}
-              {diagnosis.weather_limits !== '—' && (
-                <Text style={styles.prescriptionText}>• Окно внесения: {diagnosis.weather_limits}</Text>
-              )}
-              {diagnosis.yield_loss !== '0%' && (
-                <Text style={[styles.prescriptionText, { color: colors.danger }]}>
-                  • Оценка потерь: {diagnosis.yield_loss}
-                </Text>
-              )}
-            </View>
-
-            <Pressable
-              onPress={() => {
-                setDiagnosis(null);
-                setPhotoUri(null);
-              }}
-              style={styles.clearDiagButton}
-            >
-              <Text style={styles.clearDiagText}>Сбросить результат</Text>
-            </Pressable>
-          </View>
-        )}
-      </Card>
-
-      {/* 2. БЫСТРЫЕ ПОДСКАЗКИ */}
-      <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>ЧАСТЫЕ ВОПРОСЫ ПО РЕГИОНУ</Text>
-      </View>
-
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
-        {quickQuestions.map((q, idx) => (
-          <Pressable
-            key={idx}
-            onPress={() => void sendMessage(q)}
-            style={({ pressed }) => [styles.chipButton, pressed && styles.pressed]}
+        <View
+          style={[
+            styles.aiBubble,
+            isUser ? styles.aiBubbleUser : styles.aiBubbleAi,
+            isError && styles.aiBubbleError,
+          ]}
+        >
+          <Text
+            style={[
+              styles.aiBubbleText,
+              isUser ? styles.aiBubbleTextUser : styles.aiBubbleTextAi,
+              isError && { color: '#B91C1C' },
+            ]}
+            selectable
           >
-            <Text style={styles.chipText}>{q}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
-      {/* 3. ЧАТ С АГРОНОМОМ */}
-      <View style={[styles.sectionHeaderRow, { justifyContent: 'space-between', alignItems: 'center' }]}>
-        <Text style={styles.sectionTitle}>КОНСУЛЬТАЦИЯ AI-АГРОНОМА</Text>
-        <Pressable onPress={handleClearChat} hitSlop={8} style={({ pressed }) => pressed && styles.pressed}>
-          <Text style={styles.clearChatText}>Очистить историю</Text>
-        </Pressable>
-      </View>
-
-      <Card style={styles.chatCard}>
-        <View style={styles.chatMessagesArea}>
-          {messages.map((m) => {
-            const isUser = m.sender === 'user';
-            return (
-              <View key={m.id} style={[styles.chatBubble, isUser ? styles.userBubble : styles.aiBubble]}>
-                <Text style={[styles.chatBubbleText, isUser ? styles.userBubbleText : styles.aiBubbleText]}>
-                  {m.text}
-                </Text>
-                <Text style={[styles.chatTime, isUser ? styles.userChatTime : styles.aiChatTime]}>
-                  {m.time}
-                </Text>
-              </View>
-            );
-          })}
-          {sendingChat && (
-            <View style={[styles.chatBubble, styles.aiBubble, { flexDirection: 'row', gap: 6, alignItems: 'center' }]}>
-              <ActivityIndicator size="small" color={colors.primaryDark} />
-              <Text style={styles.aiBubbleText}>Формирую агрономический ответ…</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Input row */}
-        <View style={styles.chatInputRow}>
-          <TextInput
-            value={chatInput}
-            onChangeText={setChatInput}
-            placeholder="Задайте вопрос по нормам, болезням, сорнякам…"
-            placeholderTextColor={colors.muted}
-            style={styles.chatTextInput}
-            onSubmitEditing={() => void sendMessage()}
-            returnKeyType="send"
-          />
-          <Pressable
-            disabled={sendingChat || !chatInput.trim()}
-            onPress={() => void sendMessage()}
-            style={({ pressed }) => [
-              styles.chatSendButton,
-              (!chatInput.trim() || sendingChat || pressed) && styles.buttonPressed,
+            {msg.text}
+          </Text>
+          <Text
+            style={[
+              styles.aiBubbleTime,
+              isUser ? styles.aiBubbleTimeUser : styles.aiBubbleTimeAi,
             ]}
           >
-            <AppIcon name="paperplane.fill" size={15} color="#FFFFFF" />
+            {msg.timestamp}
+          </Text>
+        </View>
+      </View>
+    );
+  }, []);
+
+  // ── Menu View (two entry points) ──
+  if (viewMode === 'menu') {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.aiMenuHeader}>
+          <View style={styles.aiChatHeaderAvatar}>
+            <Text style={{ fontSize: 24 }}>🌱</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.aiMenuTitle}>AI Tools</Text>
+            <Text style={styles.aiMenuSubtitle}>Помощник агронома Tanap AI</Text>
+          </View>
+        </View>
+
+        <Pressable
+          onPress={() => setViewMode('photo')}
+          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
+        >
+          <View style={[styles.aiMenuIcon, { backgroundColor: '#E8F5E9' }]}>
+            <Text style={{ fontSize: 26 }}>🔬</Text>
+          </View>
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={styles.aiMenuCardTitle}>Распознавание по фото</Text>
+            <Text style={styles.aiMenuCardDesc}>
+              Болезни, вредители и сорняки по фотографии. Загрузите снимок — пойдёт анализ.
+            </Text>
+          </View>
+          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => setViewMode('count')}
+          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
+        >
+          <View style={[styles.aiMenuIcon, { backgroundColor: '#FFF3E0' }]}>
+            <Text style={{ fontSize: 26 }}>🌾</Text>
+          </View>
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={styles.aiMenuCardTitle}>Подсчёт всходов и густоты</Text>
+            <Text style={styles.aiMenuCardDesc}>
+              Визуальный подсчёт всходов; плотность на м² только с измеренной площадью кадра.
+            </Text>
+          </View>
+          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => setViewMode('grain')}
+          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
+        >
+          <View style={[styles.aiMenuIcon, { backgroundColor: '#FEF9C3' }]}>
+            <Text style={{ fontSize: 26 }}>🌰</Text>
+          </View>
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={styles.aiMenuCardTitle}>Визуальный разбор зерна</Text>
+            <Text style={styles.aiMenuCardDesc}>
+              Предварительная оценка видимых примесей и повреждений. Не заменяет лабораторию.
+            </Text>
+          </View>
+          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => setViewMode('livestock')}
+          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
+        >
+          <View style={[styles.aiMenuIcon, { backgroundColor: '#EDE9FE' }]}>
+            <Text style={{ fontSize: 26 }}>🐄</Text>
+          </View>
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={styles.aiMenuCardTitle}>Подсчёт поголовья скота</Text>
+            <Text style={styles.aiMenuCardDesc}>
+              Предварительная оценка числа видимых животных по фото стада или кадру с дрона.
+            </Text>
+          </View>
+          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => setViewMode('chat')}
+          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
+        >
+          <View style={[styles.aiMenuIcon, { backgroundColor: '#E3F2FD' }]}>
+            <Text style={{ fontSize: 26 }}>💬</Text>
+          </View>
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={styles.aiMenuCardTitle}>AI Агроном</Text>
+            <Text style={styles.aiMenuCardDesc}>
+              Чат-консультант по агрономии Северного Казахстана: болезни, СЗР, сроки, нормы.
+            </Text>
+          </View>
+          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
+        </Pressable>
+      </ScrollView>
+    );
+  }
+
+  // ── Photo Diagnosis View ──
+  if (viewMode === 'photo') {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Back to menu */}
+        <Pressable
+          onPress={handleClearPhoto}
+          style={({ pressed }) => [styles.aiBackBtn, pressed && styles.pressed]}
+        >
+          <SymbolView name="chevron.left" size={16} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
+          <Text style={styles.aiBackBtnText}>Назад</Text>
+        </Pressable>
+
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>ОЦЕНКА ПО ФОТО</Text>
+          <Text style={styles.sectionHint}>болезни · вредители · сорняки</Text>
+        </View>
+
+        {/* Upload prompt when no photo yet */}
+        {!photoUri && !isDiagnosing && (
+          <Card style={styles.aiUploadCard}>
+            <Text style={{ fontSize: 40 }}>📷</Text>
+            <Text style={styles.aiUploadTitle}>Загрузите фото для анализа</Text>
+            <Text style={styles.aiUploadDesc}>
+              Снимок листа, вредителя или сорняка крупным планом при дневном свете.
+            </Text>
+            <Pressable
+              onPress={() => handlePickPhoto(true)}
+              style={({ pressed }) => [styles.aiUploadBtn, pressed && styles.pressed]}
+            >
+              <SymbolView name="camera.fill" size={18} tintColor="#fff" fallback={<Text>📷</Text>} />
+              <Text style={styles.aiUploadBtnText}>Сделать фото</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => handlePickPhoto(false)}
+              style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+            >
+              <SymbolView name="photo.fill" size={18} tintColor={colors.primaryDark} fallback={<Text>🖼️</Text>} />
+              <Text style={styles.aiUploadBtnAltText}>Выбрать из галереи</Text>
+            </Pressable>
+          </Card>
+        )}
+
+        {(photoUri || isDiagnosing || diagnosis) && (
+        <Card style={styles.aiPhotoCard}>
+          {photoUri && (
+            <View style={styles.aiPreviewContainer}>
+              <Image source={{ uri: photoUri }} style={styles.aiPreviewImage} resizeMode="cover" />
+            </View>
+          )}
+
+          {isDiagnosing && (
+            <View style={styles.aiDiagnosingBox}>
+              <ActivityIndicator size="small" color={colors.primaryDark} />
+              <Text style={styles.aiDiagnosingText}>ИИ анализирует фитопатологию...</Text>
+            </View>
+          )}
+
+          {diagnosisError && (
+            <View style={styles.aiErrorNotice}>
+              <Text style={styles.aiErrorText}>{diagnosisError}</Text>
+            </View>
+          )}
+
+          {diagnosis && (() => {
+            const cat = getDiagCategoryMeta(diagnosis.category);
+            return (
+            <View style={styles.aiDiagResultCard}>
+              <View style={styles.aiDiagHeaderRow}>
+                <View style={{ flex: 1, gap: 4 }}>
+                  <View style={[styles.aiDiagCatPill, { backgroundColor: cat.bg }]}>
+                    <Text style={{ fontSize: 12 }}>{cat.emoji}</Text>
+                    <Text style={[styles.aiDiagCatText, { color: cat.color }]}>{cat.label}</Text>
+                  </View>
+                  {diagnosis.crop && diagnosis.crop !== '—' ? (
+                    <Text style={styles.aiDiagCrop}>{diagnosis.crop}</Text>
+                  ) : null}
+                  <Text style={styles.aiDiagTitle}>{diagnosis.object_name || diagnosis.diagnosis}</Text>
+                </View>
+                <Badge
+                  label={
+                    !diagnosis.detected
+                      ? 'НЕ ОПРЕДЕЛЕНО'
+                      : diagnosis.severity === 'high'
+                      ? 'ВЫСОКИЙ РИСК'
+                      : diagnosis.severity === 'moderate'
+                      ? 'УМЕРЕННЫЙ'
+                      : 'НОРМА'
+                  }
+                  variant={
+                    !diagnosis.detected
+                      ? 'neutral'
+                      : diagnosis.severity === 'high'
+                      ? 'danger'
+                      : diagnosis.severity === 'moderate'
+                      ? 'warning'
+                      : 'success'
+                  }
+                />
+              </View>
+
+              <View style={styles.aiDiagMetricsRow}>
+                <View style={styles.aiDiagMetricItem}>
+                  <Text style={styles.aiDiagMetricLabel}>Вероятный вид / причина</Text>
+                  <Text style={styles.aiDiagMetricVal} numberOfLines={1}>{diagnosis.pathogen}</Text>
+                </View>
+                <View style={styles.aiDiagMetricItem}>
+                  <Text style={styles.aiDiagMetricLabel}>Доля признаков в кадре</Text>
+                  <Text style={styles.aiDiagMetricVal}>
+                    {diagnosis.affected_area_percent != null ? `≈ ${diagnosis.affected_area_percent}%` : '—'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.aiDiagDesc}>Результат — визуальная гипотеза модели по этому кадру, не лабораторный диагноз и не оценка всего поля.</Text>
+
+              {diagnosis.description ? (
+                <Text style={styles.aiDiagDesc}>{diagnosis.description}</Text>
+              ) : null}
+
+              {diagnosis.detected ? (
+                <View style={styles.aiProtocolBox}>
+                  <Text style={styles.aiProtocolHeading}>
+                    {diagnosis.category === 'healthy' ? 'Рекомендации:' : 'Справочная гипотеза:'}
+                  </Text>
+                  <View style={styles.aiProtocolRow}>
+                    <Text style={styles.aiProtocolLabel}>{cat.chemLabel}</Text>
+                    <Text style={styles.aiProtocolVal}>{diagnosis.chemicals}</Text>
+                  </View>
+                  <View style={styles.aiProtocolRow}>
+                    <Text style={styles.aiProtocolLabel}>⚖️ Норма:</Text>
+                    <Text style={styles.aiProtocolVal}>{diagnosis.rate}</Text>
+                  </View>
+                  <View style={styles.aiProtocolRow}>
+                    <Text style={styles.aiProtocolLabel}>🌤️ Окно:</Text>
+                    <Text style={styles.aiProtocolVal}>{diagnosis.weather_limits}</Text>
+                  </View>
+                  <View style={styles.aiProtocolRow}>
+                    <Text style={styles.aiProtocolLabel}>Потери:</Text>
+                    <Text style={styles.aiProtocolVal}>{diagnosis.yield_loss}</Text>
+                  </View>
+                  <Text style={styles.aiDiagDesc}>Перед обработкой подтвердите диагноз осмотром поля и проверьте регламент зарегистрированного препарата.</Text>
+                </View>
+              ) : diagnosis.recommendation ? (
+                <View style={styles.aiProtocolBox}>
+                  <Text style={styles.aiProtocolHeading}>Совет агронома:</Text>
+                  <Text style={styles.aiDiagDesc}>{diagnosis.recommendation}</Text>
+                </View>
+              ) : null}
+
+              <Pressable
+                style={({ pressed }) => [styles.aiAskDiagBtn, pressed && styles.pressed]}
+                onPress={diagnosis.detected ? handleAskAboutDiagnosis : () => setViewMode('chat')}
+              >
+                <SymbolView name="bubble.left.and.bubble.right.fill" size={16} tintColor="#fff" fallback={<Text>💬</Text>} />
+                <Text style={styles.aiAskDiagBtnTextAlt}>
+                  {diagnosis.detected ? 'Спросить агронома о диагнозе' : 'Перейти в чат с агрономом'}
+                </Text>
+              </Pressable>
+            </View>
+            );
+          })()}
+        </Card>
+        )}
+
+        {(diagnosis || diagnosisError) && !isDiagnosing && (
+          <Pressable
+            onPress={handleAttachPress}
+            style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+          >
+            <SymbolView name="arrow.triangle.2.circlepath" size={16} tintColor={colors.primaryDark} fallback={<Text>↺</Text>} />
+            <Text style={styles.aiUploadBtnAltText}>Другое фото</Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    );
+  }
+
+  // ── Stand-count / seedling density View (задача 3.2) ──
+  if (viewMode === 'count') {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable
+          onPress={handleClearCount}
+          style={({ pressed }) => [styles.aiBackBtn, pressed && styles.pressed]}
+        >
+          <SymbolView name="chevron.left" size={16} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
+          <Text style={styles.aiBackBtnText}>Назад</Text>
+        </Pressable>
+
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>ГУСТОТА СТОЯНИЯ</Text>
+          <Text style={styles.sectionHint}>подсчёт всходов · фото / дрон</Text>
+        </View>
+
+        {!countPhotoUri && !isCounting && (
+          <Card style={styles.aiUploadCard}>
+            <Text style={{ fontSize: 40 }}>🌾</Text>
+            <Text style={styles.aiUploadTitle}>Загрузите фото или видео посева</Text>
+            <Text style={styles.aiUploadDesc}>
+              Для реальной плотности снимите растения внутри измеренной рамки и укажите её площадь. Без масштаба приложение покажет только визуальный подсчёт в кадре.
+            </Text>
+            <View style={styles.aiCalibrationWrap}>
+              <Text style={styles.aiCalibrationLabel}>Площадь кадра, м² (необязательно)</Text>
+              <TextInput
+                value={standAreaText}
+                onChangeText={setStandAreaText}
+                keyboardType="decimal-pad"
+                placeholder="Например, 1.0"
+                placeholderTextColor={colors.muted}
+                style={styles.aiCalibrationInput}
+              />
+              <Text style={styles.aiCalibrationHint}>Для видео площадь не применяется: масштаб между кадрами может меняться.</Text>
+            </View>
+            <Pressable
+              onPress={() => handlePickCountPhoto(true)}
+              style={({ pressed }) => [styles.aiUploadBtn, pressed && styles.pressed]}
+            >
+              <SymbolView name="camera.fill" size={18} tintColor="#fff" fallback={<Text>📷</Text>} />
+              <Text style={styles.aiUploadBtnText}>Снять фото / видео</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => handlePickCountPhoto(false)}
+              style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+            >
+              <SymbolView name="photo.fill" size={18} tintColor={colors.primaryDark} fallback={<Text>🖼️</Text>} />
+              <Text style={styles.aiUploadBtnAltText}>Выбрать из галереи</Text>
+            </Pressable>
+          </Card>
+        )}
+
+        {(countPhotoUri || isCounting || standResult) && (
+        <Card style={styles.aiPhotoCard}>
+          {countPhotoUri && (
+            <View style={styles.aiPreviewContainer}>
+              {countIsVideo ? (
+                // Image не рендерит видео — показываем аккуратную плашку вместо чёрного прямоугольника
+                <View style={[styles.aiPreviewImage, styles.aiVideoPlaceholder]}>
+                  <SymbolView name="video.fill" size={32} tintColor="#fff" fallback={<Text style={{ fontSize: 30 }}>🎬</Text>} />
+                  <Text style={styles.aiVideoPlaceholderText}>Видео загружено</Text>
+                </View>
+              ) : (
+                <Image source={{ uri: countPhotoUri }} style={styles.aiPreviewImage} resizeMode="cover" />
+              )}
+              {countIsVideo && (
+                <View style={styles.aiVideoBadge}>
+                  <SymbolView name="video.fill" size={13} tintColor="#fff" fallback={<Text style={{ color: '#fff', fontSize: 11 }}>🎬</Text>} />
+                  <Text style={styles.aiVideoBadgeText}>Видео</Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {isCounting && (
+            <View style={styles.aiDiagnosingBox}>
+              <ActivityIndicator size="small" color={colors.primaryDark} />
+              <Text style={styles.aiDiagnosingText}>
+                {countIsVideo
+                  ? 'ИИ анализирует видео и считает всходы...'
+                  : 'ИИ считает всходы и оценивает густоту...'}
+              </Text>
+            </View>
+          )}
+
+          {countError && (
+            <View style={styles.aiErrorNotice}>
+              <Text style={styles.aiErrorText}>{countError}</Text>
+            </View>
+          )}
+
+          {standResult && (() => {
+            const meta = getStandRatingMeta(standResult.stand_rating);
+            const notField = !standResult.detected || !standResult.is_field;
+            return (
+            <View style={styles.aiDiagResultCard}>
+              {notField ? (
+                <View style={styles.aiProtocolBox}>
+                  <Text style={styles.aiProtocolHeading}>Посев не распознан</Text>
+                  <Text style={styles.aiDiagDesc}>{standResult.assessment}</Text>
+                  <Text style={[styles.aiDiagDesc, { marginTop: 6 }]}>{standResult.recommendation}</Text>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.aiDiagHeaderRow}>
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <View style={[styles.aiDiagCatPill, { backgroundColor: meta.bg }]}>
+                        <Text style={{ fontSize: 12 }}>{meta.emoji}</Text>
+                        <Text style={[styles.aiDiagCatText, { color: meta.color }]}>{meta.label}</Text>
+                      </View>
+                      {standResult.crop && standResult.crop !== '—' ? (
+                        <Text style={styles.aiDiagCrop}>{standResult.crop}</Text>
+                      ) : null}
+                      <Text style={styles.aiDiagTitle}>
+                        {standResult.shot_type === 'drone' ? '🚁 Съёмка с дрона' : '📷 Наземное фото'}
+                      </Text>
+                    </View>
+                    <Badge label="ОЦЕНКА ИИ" variant="neutral" />
+                  </View>
+
+                  <View style={styles.aiStandCountBox}>
+                    <Text style={styles.aiStandCountNumber}>~{standResult.plant_count}</Text>
+                    <Text style={styles.aiStandCountCaption}>различимых всходов в типичном кадре</Text>
+                  </View>
+
+                  <View style={styles.aiDiagMetricsRow}>
+                    <View style={styles.aiDiagMetricItem}>
+                      <Text style={styles.aiDiagMetricLabel}>Плотность</Text>
+                      <Text style={styles.aiDiagMetricVal}>
+                        {standResult.density_per_m2 != null ? `${standResult.density_per_m2}/м²` : 'нет масштаба'}
+                      </Text>
+                    </View>
+                    <View style={styles.aiDiagMetricItem}>
+                      <Text style={styles.aiDiagMetricLabel}>Ориентир*</Text>
+                      <Text style={styles.aiDiagMetricVal} numberOfLines={1}>
+                        {standResult.density_per_m2 != null ? standResult.optimal_range_m2 : '—'}
+                      </Text>
+                    </View>
+                    <View style={styles.aiDiagMetricItem}>
+                      <Text style={styles.aiDiagMetricLabel}>Равномерность</Text>
+                      <Text style={styles.aiDiagMetricVal}>
+                        {standResult.uniformity === 'high'
+                          ? 'Высокая'
+                          : standResult.uniformity === 'moderate'
+                          ? 'Средняя'
+                          : standResult.uniformity === 'low'
+                          ? 'Низкая'
+                          : '—'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {standResult.frame_area_m2 != null && standResult.density_per_ha != null ? (
+                    <View style={styles.aiProtocolBox}>
+                      <Text style={styles.aiProtocolHeading}>Расчёт по введённой площади:</Text>
+                      <Text style={styles.aiDiagDesc}>
+                        Кадр {standResult.frame_area_m2} м² · эквивалент {standResult.density_per_ha >= 1000
+                          ? `${(standResult.density_per_ha / 1000).toFixed(0)} тыс./га`
+                          : `${standResult.density_per_ha}/га`}
+                      </Text>
+                      <Text style={styles.aiDiagDesc}>* Справочный диапазон по вероятно распознанной культуре, не индивидуальная норма высева для поля.</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.aiProtocolBox}>
+                      <Text style={styles.aiProtocolHeading}>Плотность не рассчитана</Text>
+                      <Text style={styles.aiDiagDesc}>Нужна измеренная площадь кадра. Масштаб по одному фото приложение не угадывает.</Text>
+                    </View>
+                  )}
+
+                  {standResult.assessment ? (
+                    <Text style={styles.aiDiagDesc}>{standResult.assessment}</Text>
+                  ) : null}
+
+                  {standResult.recommendation && standResult.recommendation !== '—' ? (
+                    <View style={styles.aiProtocolBox}>
+                      <Text style={styles.aiProtocolHeading}>Рекомендация:</Text>
+                      <Text style={styles.aiDiagDesc}>{standResult.recommendation}</Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </View>
+            );
+          })()}
+        </Card>
+        )}
+
+        {(standResult || countError) && !isCounting && (
+          <Pressable
+            onPress={() =>
+              Alert.alert('Материал посева', 'Фото рядков, ортоснимок или видео облёта дроном:', [
+                { text: 'Снять фото / видео', onPress: () => void handlePickCountPhoto(true) },
+                { text: 'Выбрать из галереи', onPress: () => void handlePickCountPhoto(false) },
+                { text: 'Отмена', style: 'cancel' },
+              ])
+            }
+            style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+          >
+            <SymbolView name="arrow.triangle.2.circlepath" size={16} tintColor={colors.primaryDark} fallback={<Text>↺</Text>} />
+            <Text style={styles.aiUploadBtnAltText}>Другой материал</Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    );
+  }
+
+  // ── Grain quality control View (задача 3.3) ──
+  if (viewMode === 'grain') {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable
+          onPress={handleClearGrain}
+          style={({ pressed }) => [styles.aiBackBtn, pressed && styles.pressed]}
+        >
+          <SymbolView name="chevron.left" size={16} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
+          <Text style={styles.aiBackBtnText}>Назад</Text>
+        </Pressable>
+
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>РАЗБОР ЗЕРНА</Text>
+          <Text style={styles.sectionHint}>примеси · битое · повреждённое</Text>
+        </View>
+
+        {!grainPhotoUri && !isGrainAnalyzing && (
+          <Card style={styles.aiUploadCard}>
+            <Text style={{ fontSize: 40 }}>🌰</Text>
+            <Text style={styles.aiUploadTitle}>Сфотографируйте пробу зерна</Text>
+            <Text style={styles.aiUploadDesc}>
+              Рассыпьте зерно тонким слоем на ровной однотонной поверхности и снимите крупным планом при дневном свете.
+            </Text>
+            <Pressable
+              onPress={() => handlePickGrainPhoto(true)}
+              style={({ pressed }) => [styles.aiUploadBtn, pressed && styles.pressed]}
+            >
+              <SymbolView name="camera.fill" size={18} tintColor="#fff" fallback={<Text>📷</Text>} />
+              <Text style={styles.aiUploadBtnText}>Сделать фото</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => handlePickGrainPhoto(false)}
+              style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+            >
+              <SymbolView name="photo.fill" size={18} tintColor={colors.primaryDark} fallback={<Text>🖼️</Text>} />
+              <Text style={styles.aiUploadBtnAltText}>Выбрать из галереи</Text>
+            </Pressable>
+          </Card>
+        )}
+
+        {(grainPhotoUri || isGrainAnalyzing || grainResult) && (
+        <Card style={styles.aiPhotoCard}>
+          {grainPhotoUri && (
+            <View style={styles.aiPreviewContainer}>
+              <Image source={{ uri: grainPhotoUri }} style={styles.aiPreviewImage} resizeMode="cover" />
+            </View>
+          )}
+
+          {isGrainAnalyzing && (
+            <View style={styles.aiDiagnosingBox}>
+              <ActivityIndicator size="small" color={colors.primaryDark} />
+              <Text style={styles.aiDiagnosingText}>ИИ оценивает засорённость и повреждения...</Text>
+            </View>
+          )}
+
+          {grainError && (
+            <View style={styles.aiErrorNotice}>
+              <Text style={styles.aiErrorText}>{grainError}</Text>
+            </View>
+          )}
+
+          {grainResult && (() => {
+            const meta = getGrainRatingMeta(grainResult.quality_rating);
+            const notGrain = !grainResult.detected || !grainResult.is_grain;
+            return (
+            <View style={styles.aiDiagResultCard}>
+              {notGrain ? (
+                <View style={styles.aiProtocolBox}>
+                  <Text style={styles.aiProtocolHeading}>Проба зерна не распознана</Text>
+                  <Text style={styles.aiDiagDesc}>{grainResult.assessment}</Text>
+                  <Text style={[styles.aiDiagDesc, { marginTop: 6 }]}>{grainResult.recommendation}</Text>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.aiDiagHeaderRow}>
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <View style={[styles.aiDiagCatPill, { backgroundColor: meta.bg }]}>
+                        <Text style={{ fontSize: 12 }}>{meta.emoji}</Text>
+                        <Text style={[styles.aiDiagCatText, { color: meta.color }]}>{meta.label}</Text>
+                      </View>
+                      {grainResult.crop && grainResult.crop !== '—' ? (
+                        <Text style={styles.aiDiagCrop}>{grainResult.crop}</Text>
+                      ) : null}
+                      <Text style={styles.aiDiagTitle}>Предварительный разбор фото</Text>
+                    </View>
+                    <Badge label="ОЦЕНКА ИИ" variant="neutral" />
+                  </View>
+
+                  <View style={styles.aiStandCountBox}>
+                    <Text style={styles.aiStandCountNumber}>
+                      {grainResult.sound_percent != null ? `≈ ${grainResult.sound_percent}%` : '—'}
+                    </Text>
+                    <Text style={styles.aiStandCountCaption}>визуальная доля целых зёрен в кадре</Text>
+                  </View>
+
+                  {/* Показатели засорённости и повреждений */}
+                  <View style={styles.aiGrainBars}>
+                    {[
+                      { label: 'Сорная примесь', val: grainResult.weed_impurity_percent, color: '#B45309' },
+                      { label: 'Зерновая примесь', val: grainResult.grain_impurity_percent, color: '#CA8A04' },
+                      { label: 'Битое зерно', val: grainResult.broken_percent, color: '#DC2626' },
+                      { label: 'Повреждённое', val: grainResult.damaged_percent, color: '#9D174D' },
+                    ].map((row) => (
+                      <View key={row.label} style={styles.aiGrainRow}>
+                        <Text style={styles.aiGrainRowLabel}>{row.label}</Text>
+                        <View style={styles.aiGrainTrack}>
+                          <View
+                            style={[
+                              styles.aiGrainFill,
+                              { width: `${Math.min(row.val ?? 0, 100)}%`, backgroundColor: row.color },
+                            ]}
+                          />
+                        </View>
+                        <Text style={[styles.aiGrainRowVal, { color: row.color }]}>
+                          {row.val != null ? `≈ ${row.val}%` : '—'}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  {grainResult.grain_count > 0 ? (
+                    <Text style={styles.aiGrainCount}>Оценено зёрен в кадре: ~{grainResult.grain_count}</Text>
+                  ) : null}
+
+                  <View style={styles.aiProtocolBox}>
+                    <Text style={styles.aiProtocolHeading}>Не лабораторный результат</Text>
+                    <Text style={styles.aiDiagDesc}>Проценты рассчитаны по видимым объектам на фото, не по массе. Класс, влажность, белок и клейковина требуют отбора пробы и лаборатории.</Text>
+                  </View>
+
+                  {grainResult.assessment ? (
+                    <Text style={styles.aiDiagDesc}>{grainResult.assessment}</Text>
+                  ) : null}
+
+                  {grainResult.recommendation && grainResult.recommendation !== '—' ? (
+                    <View style={styles.aiProtocolBox}>
+                      <Text style={styles.aiProtocolHeading}>Рекомендация:</Text>
+                      <Text style={styles.aiDiagDesc}>{grainResult.recommendation}</Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </View>
+            );
+          })()}
+        </Card>
+        )}
+
+        {(grainResult || grainError) && !isGrainAnalyzing && (
+          <Pressable
+            onPress={() =>
+              Alert.alert('Проба зерна', 'Фото пробы крупным планом:', [
+                { text: 'Сделать фото', onPress: () => void handlePickGrainPhoto(true) },
+                { text: 'Выбрать из галереи', onPress: () => void handlePickGrainPhoto(false) },
+                { text: 'Отмена', style: 'cancel' },
+              ])
+            }
+            style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+          >
+            <SymbolView name="arrow.triangle.2.circlepath" size={16} tintColor={colors.primaryDark} fallback={<Text>↺</Text>} />
+            <Text style={styles.aiUploadBtnAltText}>Другое фото</Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    );
+  }
+
+  // ── Livestock counting View (задача 3.4) ──
+  if (viewMode === 'livestock') {
+    return (
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Pressable
+          onPress={handleClearHerd}
+          style={({ pressed }) => [styles.aiBackBtn, pressed && styles.pressed]}
+        >
+          <SymbolView name="chevron.left" size={16} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
+          <Text style={styles.aiBackBtnText}>Назад</Text>
+        </Pressable>
+
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>ПОДСЧЁТ ПОГОЛОВЬЯ</Text>
+          <Text style={styles.sectionHint}>визуальная оценка по фото</Text>
+        </View>
+
+        {!herdPhotoUri && !isHerdAnalyzing && (
+          <Card style={styles.aiUploadCard}>
+            <Text style={{ fontSize: 40 }}>🐄</Text>
+            <Text style={styles.aiUploadTitle}>Сфотографируйте стадо</Text>
+            <Text style={styles.aiUploadDesc}>
+              Снимите стадо целиком при хорошем освещении. Для точности плотного стада лучше кадр с дрона (вид сверху).
+            </Text>
+            <Pressable
+              onPress={() => handlePickHerdPhoto(true)}
+              style={({ pressed }) => [styles.aiUploadBtn, pressed && styles.pressed]}
+            >
+              <SymbolView name="camera.fill" size={18} tintColor="#fff" fallback={<Text>📷</Text>} />
+              <Text style={styles.aiUploadBtnText}>Сделать фото</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => handlePickHerdPhoto(false)}
+              style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+            >
+              <SymbolView name="photo.fill" size={18} tintColor={colors.primaryDark} fallback={<Text>🖼️</Text>} />
+              <Text style={styles.aiUploadBtnAltText}>Выбрать из галереи</Text>
+            </Pressable>
+          </Card>
+        )}
+
+        {(herdPhotoUri || isHerdAnalyzing || herdResult) && (
+        <Card style={styles.aiPhotoCard}>
+          {herdPhotoUri && (
+            <View style={styles.aiPreviewContainer}>
+              <Image source={{ uri: herdPhotoUri }} style={styles.aiPreviewImage} resizeMode="cover" />
+            </View>
+          )}
+
+          {isHerdAnalyzing && (
+            <View style={styles.aiDiagnosingBox}>
+              <ActivityIndicator size="small" color={colors.primaryDark} />
+              <Text style={styles.aiDiagnosingText}>ИИ считает животных по сетке (для точности)...</Text>
+            </View>
+          )}
+
+          {herdError && (
+            <View style={styles.aiErrorNotice}>
+              <Text style={styles.aiErrorText}>{herdError}</Text>
+            </View>
+          )}
+
+          {herdResult && (() => {
+            const notHerd = !herdResult.detected || !herdResult.is_livestock;
+            return (
+            <View style={styles.aiDiagResultCard}>
+              {notHerd ? (
+                <View style={styles.aiProtocolBox}>
+                  <Text style={styles.aiProtocolHeading}>Скот не обнаружен</Text>
+                  <Text style={styles.aiDiagDesc}>{herdResult.assessment}</Text>
+                  <Text style={[styles.aiDiagDesc, { marginTop: 6 }]}>{herdResult.recommendation}</Text>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.aiDiagHeaderRow}>
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <View style={[styles.aiDiagCatPill, { backgroundColor: '#EDE9FE' }]}>
+                        <Text style={{ fontSize: 12 }}>{herdResult.shot_type === 'drone' ? '🚁' : '📷'}</Text>
+                        <Text style={[styles.aiDiagCatText, { color: '#6D28D9' }]}>
+                          {herdResult.shot_type === 'drone' ? 'Съёмка с дрона' : 'Наземное фото'}
+                        </Text>
+                      </View>
+                      <Text style={styles.aiDiagTitle}>{herdResult.dominant_species}</Text>
+                    </View>
+                    <Badge label="ОЦЕНКА ИИ" variant="neutral" />
+                  </View>
+
+                  <View style={[styles.aiStandCountBox, { backgroundColor: '#F5F3FF' }]}>
+                    <Text style={[styles.aiStandCountNumber, { color: '#6D28D9' }]}>~{herdResult.total_count}</Text>
+                    <Text style={styles.aiStandCountCaption}>
+                      видимых голов{herdResult.count_range && herdResult.count_range !== '—' ? ` · диапазон ${herdResult.count_range}` : ''}
+                    </Text>
+                  </View>
+
+                  {/* Разбивка по видам */}
+                  {herdResult.species.length > 0 && (
+                    <View style={styles.aiSpeciesList}>
+                      {herdResult.species.map((sp, idx) => (
+                        <View key={`${sp.name_en}-${idx}`} style={styles.aiSpeciesRow}>
+                          <Text style={styles.aiSpeciesEmoji}>{speciesEmoji(sp.name_en)}</Text>
+                          <Text style={styles.aiSpeciesName} numberOfLines={1}>{sp.name}</Text>
+                          <Text style={styles.aiSpeciesCount}>~{sp.count}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {herdResult.crowding && herdResult.crowding !== '—' ? (
+                    <Text style={styles.aiGrainCount}>
+                      Скученность: {herdResult.crowding === 'high' ? 'высокая' : herdResult.crowding === 'moderate' ? 'средняя' : 'низкая'}
+                    </Text>
+                  ) : null}
+
+                  {herdResult.assessment ? (
+                    <Text style={styles.aiDiagDesc}>{herdResult.assessment}</Text>
+                  ) : null}
+
+                  {herdResult.recommendation && herdResult.recommendation !== '—' ? (
+                    <View style={styles.aiProtocolBox}>
+                      <Text style={styles.aiProtocolHeading}>Совет для точности:</Text>
+                      <Text style={styles.aiDiagDesc}>{herdResult.recommendation}</Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </View>
+            );
+          })()}
+        </Card>
+        )}
+
+        {(herdResult || herdError) && !isHerdAnalyzing && (
+          <Pressable
+            onPress={() =>
+              Alert.alert('Фото стада', 'Снимок поголовья крупным планом:', [
+                { text: 'Сделать фото', onPress: () => void handlePickHerdPhoto(true) },
+                { text: 'Выбрать из галереи', onPress: () => void handlePickHerdPhoto(false) },
+                { text: 'Отмена', style: 'cancel' },
+              ])
+            }
+            style={({ pressed }) => [styles.aiUploadBtnAlt, pressed && styles.pressed]}
+          >
+            <SymbolView name="arrow.triangle.2.circlepath" size={16} tintColor={colors.primaryDark} fallback={<Text>↺</Text>} />
+            <Text style={styles.aiUploadBtnAltText}>Другое фото</Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    );
+  }
+
+  // ── Main Chat View (Full-screen messenger layout) ──
+  const canSend = !!inputText.trim() && !isAnswering;
+  return (
+    <View style={styles.aiChatContainer}>
+      {/* Header Bar */}
+      <View style={styles.aiChatHeader}>
+        <View style={styles.aiChatHeaderLeft}>
+          <Pressable
+            onPress={() => setViewMode('menu')}
+            style={({ pressed }) => [styles.aiChatBackBtn, pressed && styles.pressed]}
+            hitSlop={8}
+          >
+            <SymbolView name="chevron.left" size={20} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
+          </Pressable>
+          <View style={styles.aiChatHeaderAvatar}>
+            <Text style={{ fontSize: 20 }}>🌱</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.aiChatHeaderTitle}>AI Агроном</Text>
+            <View style={styles.aiChatHeaderStatusRow}>
+              <View style={styles.aiChatHeaderDot} />
+              <Text style={styles.aiChatHeaderStatus}>На связи · отвечает за секунды</Text>
+            </View>
+          </View>
+        </View>
+        {messages.length > 1 && (
+          <Pressable
+            onPress={handleClearHistory}
+            style={({ pressed }) => [styles.aiChatHeaderBtn, pressed && styles.pressed]}
+            hitSlop={8}
+          >
+            <SymbolView name="trash" size={16} tintColor={colors.muted} fallback={<Text>🗑️</Text>} />
+          </Pressable>
+        )}
+      </View>
+
+      {/* Quick Chips (only show when few messages) */}
+      {messages.length <= 2 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.aiChipsScroll}
+          style={styles.aiChipsRow}
+        >
+          {quickQuestions.map((q, idx) => (
+            <Pressable
+              key={idx}
+              style={({ pressed }) => [styles.aiChip, pressed && styles.aiChipPressed]}
+              onPress={() => handleSendMessage(q)}
+              disabled={isAnswering}
+            >
+              <Text style={styles.aiChipText}>{q}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+
+      {/* Messages List */}
+      <FlatList
+        ref={chatListRef}
+        style={styles.aiChatList}
+        data={messages}
+        renderItem={renderMessage}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.aiChatListContent}
+        showsVerticalScrollIndicator={false}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        ListFooterComponent={
+          isAnswering ? (
+            <View style={[styles.aiMessageWrap, styles.aiMessageWrapAi]}>
+              <View style={styles.aiAvatarSmall}>
+                <Text style={{ fontSize: 14 }}>🌱</Text>
+              </View>
+              <View style={[styles.aiBubble, styles.aiBubbleAi]}>
+                <TypingDots />
+              </View>
+            </View>
+          ) : null
+        }
+        onContentSizeChange={() => {
+          chatListRef.current?.scrollToEnd({ animated: true });
+        }}
+      />
+
+      {/* Input Bar */}
+      <View
+        style={[
+          styles.aiInputBarWrap,
+          { paddingBottom: kbHeight > 0 ? kbHeight + 8 : Math.max(insets.bottom, 10) },
+        ]}
+      >
+        <View style={styles.aiInputBar}>
+          <TextInput
+            ref={inputRef}
+            style={styles.aiTextInput}
+            placeholder="Спросите агронома…"
+            placeholderTextColor={colors.muted}
+            value={inputText}
+            onChangeText={setInputText}
+            multiline
+            maxLength={500}
+            editable={!isAnswering}
+            onSubmitEditing={() => handleSendMessage()}
+            blurOnSubmit={false}
+          />
+          <Pressable
+            style={({ pressed }) => [
+              styles.aiSendButton,
+              !canSend && styles.aiSendButtonDisabled,
+              pressed && canSend && styles.pressed,
+            ]}
+            onPress={() => handleSendMessage()}
+            disabled={!canSend}
+          >
+            <SymbolView
+              name="arrow.up"
+              size={18}
+              tintColor="#FFFFFF"
+              fallback={<Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>↑</Text>}
+            />
           </Pressable>
         </View>
-      </Card>
-
-      <Pressable
-        onPress={onNavigateToFields}
-        style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed, { marginTop: 4 }]}
-      >
-        <Text style={styles.secondaryButtonText}>Перейти к моим участкам</Text>
-      </Pressable>
-    </ScrollView>
+      </View>
+    </View>
   );
 }
 
@@ -1039,6 +2297,12 @@ const styles = StyleSheet.create({
   tabContentArea: {
     flex: 1,
   },
+  tabPane: {
+    flex: 1,
+  },
+  tabPaneHidden: {
+    display: 'none',
+  },
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: 8,
@@ -1328,266 +2592,794 @@ const styles = StyleSheet.create({
     marginLeft: 60,
   },
 
-  /* AI Tools Interactive UI */
-  aiPhotoCard: {
-    padding: 14,
-    gap: 12,
+  /* AI Tools Screen Styles */
+  aiHeroCard: {
+    padding: 16,
+    gap: 8,
+    backgroundColor: '#F5FAF5',
+    borderWidth: 1,
+    borderColor: '#D8E8D8',
   },
-  aiPhotoHeader: {
+  aiHeroTopRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  aiHeroBadgeWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#E4F4E4',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  aiHeroPulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#2E7D32',
+  },
+  aiHeroBadgeText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 10,
+    color: '#1B5E20',
+    letterSpacing: 0.4,
+  },
+  aiHeroTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 20,
+    color: colors.text,
+  },
+  aiHeroSubtitle: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.textSecondary,
+  },
+
+  /* Photo Diagnosis Card */
+  aiPhotoCard: {
+    padding: 16,
+    gap: 14,
+  },
+  aiPhotoPlaceholder: {
+    alignItems: 'center',
+    paddingVertical: 20,
+    paddingHorizontal: 12,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: '#CCDCCC',
+    borderRadius: 12,
+    backgroundColor: '#FAFDF9',
+    gap: 8,
   },
   aiPhotoIconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 2,
   },
-  aiPhotoTextWrap: {
-    flex: 1,
-    gap: 3,
-  },
-  aiPhotoTitle: {
+  aiPhotoPlaceholderTitle: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 14.5,
+    fontSize: 14,
     color: colors.text,
+    textAlign: 'center',
   },
-  aiPhotoDescription: {
+  aiPhotoPlaceholderSub: {
     fontFamily: fontFamilies.regular,
     fontSize: 12,
-    lineHeight: 16.5,
+    lineHeight: 16,
     color: colors.textSecondary,
+    textAlign: 'center',
   },
-  aiButtonsRow: {
+  aiPreviewContainer: {
+    position: 'relative',
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  aiPreviewImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 12,
+    backgroundColor: '#1F2937',
+  },
+  aiVideoBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  aiVideoBadgeText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11,
+    color: '#fff',
+  },
+  aiVideoPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
   },
-  aiActionButton: {
+  aiVideoPlaceholderText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: '#fff',
+  },
+  aiClearPhotoBtn: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 14,
+    padding: 4,
+  },
+  aiPhotoActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  aiPhotoBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.primary,
-    paddingVertical: 10,
-    borderRadius: 8,
-    gap: 6,
+    gap: 8,
+    paddingVertical: 11,
+    borderRadius: 10,
   },
-  aiActionButtonText: {
+  aiPhotoBtnPrimary: {
+    backgroundColor: colors.primaryDark,
+  },
+  aiPhotoBtnSecondary: {
+    backgroundColor: colors.primarySoft,
+  },
+  aiPhotoBtnTextPrimary: {
     fontFamily: fontFamilies.semiBold,
     fontSize: 13,
     color: '#FFFFFF',
   },
-  aiSecondaryActionButton: {
-    flex: 1,
+  aiPhotoBtnTextSecondary: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: colors.primaryDark,
+  },
+  aiDiagnosingBox: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    paddingVertical: 10,
-    borderRadius: 8,
-    gap: 6,
+    gap: 10,
+    paddingVertical: 12,
+    backgroundColor: '#F0F8F0',
+    borderRadius: 10,
   },
-  aiSecondaryActionButtonText: {
-    fontFamily: fontFamilies.semiBold,
+  aiDiagnosingText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 13,
+    color: colors.primaryDark,
+  },
+  aiErrorNotice: {
+    padding: 10,
+    backgroundColor: '#FFF2F2',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FFD6D6',
+  },
+  aiErrorText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: colors.danger,
+    textAlign: 'center',
+  },
+
+  /* Diagnosis Result Card */
+  aiDiagResultCard: {
+    paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    gap: 12,
+  },
+  aiDiagHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  aiDiagCatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    paddingVertical: 3,
+    paddingHorizontal: 9,
+    borderRadius: 12,
+  },
+  aiDiagCatText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 11,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  aiDiagCrop: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 12,
+    color: colors.primaryDark,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  aiDiagTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 17,
+    color: colors.text,
+  },
+  aiDiagMetricsRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  aiStandCountBox: {
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderRadius: 14,
+    paddingVertical: 14,
+    gap: 2,
+  },
+  aiStandCountNumber: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 40,
+    lineHeight: 46,
+    color: '#166534',
+  },
+  aiStandCountCaption: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  aiGrainBars: {
+    gap: 8,
+  },
+  aiGrainRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  aiGrainRowLabel: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: colors.text,
+    width: 120,
+  },
+  aiGrainTrack: {
+    flex: 1,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.surfaceSecondary,
+    overflow: 'hidden',
+  },
+  aiGrainFill: {
+    height: 8,
+    borderRadius: 4,
+  },
+  aiGrainRowVal: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 12,
+    width: 44,
+    textAlign: 'right',
+  },
+  aiGrainCount: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  aiSpeciesList: {
+    gap: 6,
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 10,
+    padding: 10,
+  },
+  aiSpeciesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  aiSpeciesEmoji: {
+    fontSize: 20,
+  },
+  aiSpeciesName: {
+    flex: 1,
+    fontFamily: fontFamilies.medium,
+    fontSize: 14,
+    color: colors.text,
+  },
+  aiSpeciesCount: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: '#6D28D9',
+  },
+  aiDiagMetricItem: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 2,
+  },
+  aiDiagMetricLabel: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  aiDiagMetricVal: {
+    fontFamily: fontFamilies.bold,
     fontSize: 13,
     color: colors.text,
   },
-  analyzingBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: 8,
+  aiDiagDesc: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.textSecondary,
   },
-  analyzingText: {
-    fontFamily: fontFamilies.medium,
+  aiProtocolBox: {
+    backgroundColor: '#F9FCF9',
+    borderWidth: 1,
+    borderColor: '#E2EFE2',
+    borderRadius: 10,
+    padding: 12,
+    gap: 6,
+  },
+  aiProtocolHeading: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 13,
+    color: colors.text,
+    marginBottom: 4,
+  },
+  aiProtocolRow: {
+    gap: 2,
+  },
+  aiProtocolLabel: {
+    fontFamily: fontFamilies.semiBold,
     fontSize: 12,
     color: colors.primaryDark,
   },
-  diagnosisCard: {
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: 10,
-    padding: 12,
-    gap: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-  },
-  diagnosisTopRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  diagnosisThumb: {
-    width: 78,
-    height: 78,
-    borderRadius: 8,
-    backgroundColor: colors.border,
-  },
-  diagnosisInfo: {
-    flex: 1,
-    gap: 3,
-  },
-  diagnosisBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 6,
-  },
-  confidenceText: {
-    fontFamily: fontFamilies.medium,
-    fontSize: 11,
-    color: colors.muted,
-  },
-  diagnosisTitle: {
-    fontFamily: fontFamilies.bold,
-    fontSize: 14.5,
-    color: colors.text,
-    marginTop: 2,
-  },
-  diagnosisCrop: {
-    fontFamily: fontFamilies.medium,
-    fontSize: 12,
-    color: colors.textSecondary,
-  },
-  diagnosisPathogen: {
-    fontFamily: fontFamilies.regular,
-    fontStyle: 'italic',
-    fontSize: 11.5,
-    color: colors.muted,
-  },
-  diagnosisDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
-  },
-  prescriptionBlock: {
-    gap: 4,
-  },
-  prescriptionLabel: {
-    fontFamily: fontFamilies.semiBold,
-    fontSize: 11,
-    letterSpacing: 0.5,
-    color: colors.textSecondary,
-  },
-  prescriptionText: {
+  aiProtocolVal: {
     fontFamily: fontFamilies.regular,
     fontSize: 12.5,
     lineHeight: 17,
     color: colors.text,
   },
-  clearDiagButton: {
+  aiAskDiagBtn: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 6,
-  },
-  clearDiagText: {
-    fontFamily: fontFamilies.medium,
-    fontSize: 12,
-    color: colors.danger,
-  },
-
-  /* Chips */
-  chipsRow: {
-    paddingHorizontal: 2,
+    justifyContent: 'center',
     gap: 8,
-    paddingVertical: 2,
+    paddingVertical: 12,
+    backgroundColor: colors.primaryDark,
+    borderRadius: 10,
   },
-  chipButton: {
-    backgroundColor: colors.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-  },
-  chipText: {
-    fontFamily: fontFamilies.medium,
-    fontSize: 12,
-    color: colors.text,
-  },
-
-  /* Chat */
-  chatCard: {
-    padding: 12,
-    gap: 12,
-  },
-  chatMessagesArea: {
-    gap: 10,
-    minHeight: 80,
-  },
-  chatBubble: {
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 12,
-    maxWidth: '88%',
-    gap: 3,
-  },
-  userBubble: {
-    alignSelf: 'flex-end',
-    backgroundColor: colors.primary,
-    borderBottomRightRadius: 2,
-  },
-  aiBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.surfaceSecondary,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    borderBottomLeftRadius: 2,
-  },
-  chatBubbleText: {
+  aiAskDiagBtnText: {
+    fontFamily: fontFamilies.semiBold,
     fontSize: 13,
-    lineHeight: 18,
+    color: colors.primaryDark,
   },
-  userBubbleText: {
-    fontFamily: fontFamilies.regular,
+  aiAskDiagBtnTextAlt: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
     color: '#FFFFFF',
   },
-  aiBubbleText: {
-    fontFamily: fontFamilies.regular,
+
+  /* Back button for photo view */
+  aiBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 6,
+    alignSelf: 'flex-start',
+  },
+  aiBackBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 14,
+    color: colors.primaryDark,
+  },
+
+  /* AI Tools — menu with two entry points */
+  aiMenuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 8,
+    marginBottom: 4,
+  },
+  aiMenuTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 22,
     color: colors.text,
   },
-  chatTime: {
-    fontSize: 10,
-    alignSelf: 'flex-end',
-  },
-  userChatTime: {
-    fontFamily: fontFamilies.medium,
-    color: 'rgba(255,255,255,0.7)',
-  },
-  aiChatTime: {
-    fontFamily: fontFamilies.medium,
-    color: colors.muted,
-  },
-  chatInputRow: {
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-    paddingTop: 10,
-  },
-  chatTextInput: {
-    flex: 1,
-    height: 38,
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: 8,
-    paddingHorizontal: 12,
+  aiMenuSubtitle: {
     fontFamily: fontFamilies.regular,
     fontSize: 13,
-    color: colors.text,
+    color: colors.textSecondary,
   },
-  chatSendButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    backgroundColor: colors.primary,
+  aiMenuCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    padding: 16,
+    backgroundColor: colors.surface,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  aiMenuCardPressed: {
+    backgroundColor: colors.surfaceSecondary,
+  },
+  aiMenuIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  aiMenuCardTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: colors.text,
+  },
+  aiMenuCardDesc: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    lineHeight: 17,
+    color: colors.textSecondary,
+  },
+
+  /* Photo upload prompt */
+  aiUploadCard: {
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+  },
+  aiUploadTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: colors.text,
+    textAlign: 'center',
+  },
+  aiUploadDesc: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  aiCalibrationWrap: {
+    alignSelf: 'stretch',
+    gap: 6,
+    marginBottom: 8,
+  },
+  aiCalibrationLabel: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12,
+    color: colors.text,
+  },
+  aiCalibrationInput: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    fontFamily: fontFamilies.regular,
+    fontSize: 15,
+    color: colors.text,
+    backgroundColor: colors.surface,
+  },
+  aiCalibrationHint: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+  },
+  aiUploadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    alignSelf: 'stretch',
+    paddingVertical: 13,
+    borderRadius: 12,
+    backgroundColor: colors.primaryDark,
+  },
+  aiUploadBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 14,
+    color: '#FFFFFF',
+  },
+  aiUploadBtnAlt: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    alignSelf: 'stretch',
+    paddingVertical: 13,
+    borderRadius: 12,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: '#C8E6C9',
+  },
+  aiUploadBtnAltText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 14,
+    color: colors.primaryDark,
+  },
+  aiChatBackBtn: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: -4,
+  },
+
+  /* AI Chat — Full-screen Messenger Layout */
+  aiChatContainer: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  aiChatHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: colors.surface,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  aiChatHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  aiChatHeaderAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#E8F5E9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiChatHeaderTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 15,
+    color: colors.text,
+  },
+  aiChatHeaderStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  aiChatHeaderDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#2E7D32',
+  },
+  aiChatHeaderStatus: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: colors.success,
+  },
+  aiChatHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  aiChatHeaderBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* Quick chips */
+  aiClearHistoryText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12.5,
+    color: colors.muted,
+  },
+  aiChipsRow: {
+    flexGrow: 0,
+    flexShrink: 0,
+    backgroundColor: colors.surface,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  aiChipsScroll: {
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    alignItems: 'center',
+  },
+  aiChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: '#C8E6C9',
+  },
+  aiChipPressed: {
+    backgroundColor: '#C8E6C9',
+  },
+  aiChipText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12.5,
+    color: colors.primaryDark,
+  },
+
+  /* Chat list */
+  aiChatList: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  aiChatListContent: {
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  aiMessagesContainer: {
+    gap: 10,
+    minHeight: 120,
+  },
+  aiMessageWrap: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'flex-end',
+  },
+  aiMessageWrapUser: {
+    justifyContent: 'flex-end',
+  },
+  aiMessageWrapAi: {
+    justifyContent: 'flex-start',
+  },
+  aiAvatarSmall: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#E8F5E9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+    borderWidth: 1,
+    borderColor: '#C8E6C9',
+  },
+  aiBubble: {
+    maxWidth: '82%',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  aiBubbleUser: {
+    backgroundColor: colors.primaryDark,
+    borderBottomRightRadius: 4,
+  },
+  aiBubbleAi: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderBottomLeftRadius: 4,
+  },
+  aiBubbleError: {
+    backgroundColor: '#FFF5F5',
+    borderColor: '#FECACA',
+  },
+  aiBubbleThinking: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  aiBubbleText: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  aiBubbleTextUser: {
+    fontFamily: fontFamilies.regular,
+    color: '#FFFFFF',
+  },
+  aiBubbleTextAi: {
+    fontFamily: fontFamilies.regular,
+    color: colors.text,
+  },
+  aiThinkingText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  aiBubbleTime: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 10,
+    alignSelf: 'flex-end',
+  },
+  aiBubbleTimeUser: {
+    color: 'rgba(255,255,255,0.65)',
+  },
+  aiBubbleTimeAi: {
+    color: colors.muted,
+  },
+
+  /* Input Bar — pinned to bottom */
+  aiInputBarWrap: {
+    backgroundColor: colors.surface,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  aiInputBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  aiAttachBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiTextInput: {
+    flex: 1,
+    minHeight: 40,
+    maxHeight: 110,
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 10,
+    fontFamily: fontFamilies.regular,
+    fontSize: 15,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  aiSendButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.primaryDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  aiSendButtonDisabled: {
+    backgroundColor: colors.border,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+
 
   /* Profile Tab Styles */
   avatarBlock: {

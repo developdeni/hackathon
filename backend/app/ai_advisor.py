@@ -2,12 +2,32 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import re
+import time
 from typing import Any
 
+import httpx
 import numpy as np
 from PIL import Image
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L8PPAiT6XJDA7hdSOpVdXwsB6bCGMatS1FfzONO4oIgg")
+# Каскад проверенных высокоскоростных моделей Google Gemini с активной квотой
+GEMINI_MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+]
+# Фото-диагностика: мультимодальный каскад проверенных моделей Gemini Vision
+VISION_MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+]
+
 
 # ---------------------------------------------------------------------------
 # Agronomic Knowledge Base for Northern Kazakhstan (Akmola / Kostanay / NKO)
@@ -95,14 +115,174 @@ AGRONOMIC_DISEASES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Computer Vision Image Diagnostic Engine
+# Computer Vision & Gemini Multimodal Diagnostic Engine
 # ---------------------------------------------------------------------------
+
+def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
+    """
+    Sends the leaf/field photo to Google Gemini Multimodal Vision API
+    with automatic model fallback (gemini-flash-latest -> gemini-3.6-flash -> gemini-3.5-flash).
+    """
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        # Resize thumbnail to max 1024x1024 to ensure fast upload and sub-2s inference
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        im.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=85)
+        b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        prompt = (
+            "Ты — ведущий эксперт-агроном Tanap AI для Северного и Центрального Казахстана "
+            "(Акмолинская, Костанайская, СКО). Проведи предварительную визуальную интерпретацию фото.\n\n"
+            "КРИТИЧЕСКОЕ ПРАВИЛО 1 (ОПРЕДЕЛЕНИЕ ОБЪЕКТА):\n"
+            "Сначала определи, действительно ли на фото живое растение, лист, колос, сорняк, поле или вредитель.\n"
+            "Если на фото экран монитора/компьютера, скриншот, интерьер, комната, человек, автомобиль, бытовой предмет, "
+            "или любой объект, НЕ являющийся живым растением/полем/вредителем, ты ОБЯЗАН вернуть:\n"
+            "category = \"none\", detected = false!\n\n"
+            "КРИТИЧЕСКОЕ ПРАВИЛО 2 (ДИНАМИЧЕСКИЙ АНАЛИЗ БЕЗ ОГРАНИЧЕНИЙ):\n"
+            "Формируй гипотезу по наблюдаемым визуальным признакам на снимке, НЕ ограничиваясь шаблонами.\n"
+            "Определяй ЛЮБУЮ культуру (яровая пшеница, озимая пшеница, ячмень, рапс, подсолнечник, лен, овес, чечевица, горох, соя, кукуруза, картофель и др.).\n"
+            "Диагностируй ЛЮБЫЕ патологии: листовые и стеблевые ржавчины, пятнистости (септориоз, гельминтоспориоз, темно-бурая, сетчатая), фузариоз, альтернариоз, мучнистая роса, бактериозы, хлорозы, дефициты макро- и микроэлементов (N, P, K, Mg, S, Fe, Zn), гербицидный токсикоз.\n"
+            "Идентифицируй любых вредителей (злаковая тля, хлебный жук, пьявица, трипсы, совка, саранча, клоп-черепашка, блошки) или сорные растения (осот, вьюнок, овсюг, марь, щетинник, щирица).\n\n"
+            "Категории (поле category):\n"
+            "  • \"disease\" — болезнь или дефицит питания живого растения;\n"
+            "  • \"pest\" — вредитель или характерные повреждения от него;\n"
+            "  • \"weed\" — сорное растение;\n"
+            "  • \"healthy\" — здоровое культурное растение без признаков поражения;\n"
+            "  • \"none\" — на фото НЕТ живых растений/поля (экран компьютера, интерьер, техника, люди, предметы).\n\n"
+            "Верни ответ СТРОГО валидным JSON:\n"
+            "{\n"
+            '  "detected": true,\n'
+            '  "category": "disease | pest | weed | healthy | none",\n'
+            '  "crop": "Вероятная культура или \'—\' если сорняк/не растение",\n'
+            '  "object_name": "Конкретное наименование объекта (напр. \'Сетчатая пятнистость ячменя\', \'Злаковая тля\', \'Осот желтый полевой\', \'Экран монитора / интерьер\')",\n'
+            '  "diagnosis": "Диагноз или экспертный вывод по снимку",\n'
+            '  "pathogen": "Латинское название возбудителя/вида или физиологическая причина (или \'—\')",\n'
+            '  "severity": "low | moderate | high",\n'
+            '  "affected_area_percent": 15.0,\n'
+            '  "description": "Описание наблюдаемых визуальных признаков на органе растения и возможных альтернатив",\n'
+            '  "recommendation": "Агрономический план действий",\n'
+            '  "chemicals": "Рекомендуемые действующие вещества препаратов под обнаруженный объект (или \'—\')",\n'
+            '  "rate": "Норма расхода препарата (или \'—\')",\n'
+            '  "weather_limits": "Агрометеорологическое окно обработки (температура, ветер, осадки)",\n'
+            '  "yield_loss": "Не рассчитывается по одному фото; нужна полевая оценка распространённости и развития"\n'
+            "}\n"
+        )
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        # Мультимодальные модели Gemini для фото-диагностики
+        for model_name in VISION_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                with httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                        parsed = json.loads(raw_json)
+                        category = str(parsed.get("category") or "").lower().strip()
+                        detected = bool(parsed.get("detected", True))
+                        if category not in ["disease", "pest", "weed", "healthy", "none"]:
+                            category = "disease" if detected else "none"
+
+                        if category == "none" or not detected:
+                            return {
+                                "detected": False,
+                                "category": "none",
+                                "object_name": str(parsed.get("object_name") or "Не растение"),
+                                "crop": "—",
+                                "diagnosis": str(parsed.get("diagnosis") or "Растение на снимке не обнаружено"),
+                                "pathogen": "—",
+                                "severity": "low",
+                                "confidence": None,
+                                "affected_area_percent": None,
+                                "metric_basis": "visual_model_interpretation",
+                                "description": str(parsed.get("description") or "На снимке не обнаружено сельскохозяйственных растений."),
+                                "recommendation": str(parsed.get("recommendation") or "Сделайте чёткий снимок листа, колоса или сорняка крупным планом при хорошем освещении."),
+                                "chemicals": "—",
+                                "rate": "—",
+                                "weather_limits": "—",
+                                "yield_loss": "Не рассчитывается по одному фото",
+                            }
+
+                        severity = parsed.get("severity", "low")
+                        if severity not in ["low", "moderate", "high"]:
+                            severity = "moderate" if "mod" in str(severity).lower() else ("high" if "high" in str(severity).lower() else "low")
+
+                        return {
+                            "detected": True,
+                            "category": category,
+                            "object_name": str(parsed.get("object_name") or parsed.get("diagnosis") or "Сельхозкультура"),
+                            "crop": str(parsed.get("crop") or "Сельхозкультура"),
+                            "diagnosis": str(parsed.get("diagnosis") or "Агрономический осмотр"),
+                            "pathogen": str(parsed.get("pathogen") or "—"),
+                            "severity": severity,
+                            "confidence": None,
+                            "affected_area_percent": _pct(parsed.get("affected_area_percent")),
+                            "metric_basis": "visual_model_interpretation",
+                            "description": str(parsed.get("description") or ""),
+                            "recommendation": str(parsed.get("recommendation") or ""),
+                            "chemicals": str(parsed.get("chemicals") or "—"),
+                            "rate": str(parsed.get("rate") or "—"),
+                            "weather_limits": str(parsed.get("weather_limits") or "—"),
+                            "yield_loss": "Не рассчитывается по одному фото; нужна полевая оценка распространённости и развития болезни",
+                        }
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return None
+
 
 def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> dict[str, Any]:
     """
-    Analyzes an agronomic leaf/field photograph using spectral color-space decomposition
-    and morphological texture variance to detect diseases, chlorosis, and damage.
+    Interprets an agronomic photograph with Gemini and returns no diagnosis when
+    the model is unavailable. Colour heuristics are intentionally not used.
     """
+    # 1. Primary: High-accuracy multimodal Gemini vision model
+    gemini_diag = _query_gemini_vision(image_bytes)
+    if gemini_diag is not None:
+        return gemini_diag
+
+    # A colour-ratio heuristic cannot distinguish disease, lighting and soil background
+    # reliably enough to support treatment decisions. Fail honestly when vision is offline.
+    return {
+        "detected": False,
+        "category": "none",
+        "object_name": "Анализ недоступен",
+        "crop": "—",
+        "diagnosis": "Модель визуальной диагностики временно недоступна",
+        "pathogen": "—",
+        "severity": "low",
+        "confidence": None,
+        "affected_area_percent": None,
+        "metric_basis": "unavailable",
+        "description": "Снимок не анализировался: локальная цветовая эвристика отключена, потому что она не является достоверной диагностикой.",
+        "recommendation": "Повторите запрос позже или подтвердите симптомы полевым осмотром агронома.",
+        "chemicals": "—",
+        "rate": "—",
+        "weather_limits": "—",
+        "yield_loss": "Не рассчитывается по одному фото",
+    }
+
+    # 2. Локальный спектральный анализатор (fallback при недоступности облачных моделей)
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         # Resize to standardized analytical resolution
@@ -116,47 +296,71 @@ def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> 
 
         # Excess Green Index (ExG = 2*G - R - B)
         exg = 2.0 * g - r - b
-        vegetation_mask = exg > 0.05
-        veg_pixels = int(np.count_nonzero(vegetation_mask))
-        total_pixels = r.size
 
-        if veg_pixels < total_pixels * 0.08:
-            # Not enough plant matter (could be soil, sky or equipment)
+        # Fast HSV conversion to verify biological foliage chromaticity
+        max_c = np.maximum(np.maximum(r, g), b)
+        min_c = np.minimum(np.minimum(r, g), b)
+        diff = max_c - min_c
+
+        saturation = np.where(max_c == 0, 0, diff / (max_c + 1e-6))
+        value = max_c
+
+        hue = np.zeros_like(r)
+        mask_r = (max_c == r) & (diff > 1e-5)
+        mask_g = (max_c == g) & (diff > 1e-5)
+        mask_b = (max_c == b) & (diff > 1e-5)
+
+        hue[mask_r] = ((g[mask_r] - b[mask_r]) / diff[mask_r]) % 6
+        hue[mask_g] = ((b[mask_g] - r[mask_g]) / diff[mask_g]) + 2
+        hue[mask_b] = ((r[mask_b] - g[mask_b]) / diff[mask_b]) + 4
+        hue = hue / 6.0  # 0..1 range (0.13 to 0.45 corresponds to 48° - 162° yellow-green)
+
+        # Strict organic plant foliage mask: natural hue, organic saturation and brightness, ExG positive
+        plant_mask = (hue >= 0.13) & (hue <= 0.45) & (saturation >= 0.18) & (value >= 0.12) & (value <= 0.95) & (exg > 0.06)
+        plant_pixels = int(np.count_nonzero(plant_mask))
+        total_pixels = r.size
+        plant_ratio = float(plant_pixels) / max(total_pixels, 1)
+
+        # Non-plant rejection filter (computer screen, room interior, vehicle, paper, keyboard)
+        if plant_ratio < 0.15:
             return {
                 "detected": False,
-                "crop": "Не определено",
-                "diagnosis": "Растительный покров не обнаружен",
-                "pathogen": "На снимке преобладает почва, техника или фон",
+                "category": "none",
+                "object_name": "Не растение (экран / интерьер / посторонний предмет)",
+                "crop": "—",
+                "diagnosis": "Растение на снимке не обнаружено",
+                "pathogen": "—",
                 "severity": "low",
-                "confidence": 0.65,
+                "confidence": 0.88,
                 "affected_area_percent": 0.0,
-                "recommendation": "Сделайте чёткий снимок листа крупным планом при естественном дневном свете.",
+                "description": "На снимке преобладает посторонний фон, экран компьютера или интерьер помещения (растительный покров < 15%).",
+                "recommendation": "Направьте камеру на лист сельхозкультуры, сорняк или вредителя крупным планом при дневном свете.",
                 "chemicals": "—",
                 "rate": "—",
                 "weather_limits": "—",
-                "yield_loss": "—",
+                "yield_loss": "0%",
             }
 
-        # Color signature analysis on vegetation pixels:
-        veg_r = r[vegetation_mask]
-        veg_g = g[vegetation_mask]
-        veg_b = b[vegetation_mask]
+        # Color signature analysis on genuine vegetation pixels:
+        veg_r = r[plant_mask]
+        veg_g = g[plant_mask]
+        veg_b = b[plant_mask]
 
-        # Yellow rust signature: R > 0.55, G > 0.45, B < 0.3 (Orange/Yellow pustule spots)
+        # Yellow rust signature: R > 0.52, G > 0.42, B < 0.35 (Orange/Yellow pustules)
         yellow_pustule_mask = (veg_r > 0.52) & (veg_g > 0.42) & (veg_b < 0.35)
-        yellow_ratio = float(np.count_nonzero(yellow_pustule_mask)) / max(veg_pixels, 1)
+        yellow_ratio = float(np.count_nonzero(yellow_pustule_mask)) / max(plant_pixels, 1)
 
-        # Necrosis / Septoria signature: dark brown spots (R in 0.25-0.5, G < 0.4, B < 0.3)
+        # Necrosis / Septoria signature: dark brown spots (R in 0.30-0.5, G < 0.38, B < 0.28)
         necrotic_mask = (veg_r > 0.30) & (veg_g < 0.38) & (veg_b < 0.28) & (veg_r > veg_g)
-        necrotic_ratio = float(np.count_nonzero(necrotic_mask)) / max(veg_pixels, 1)
+        necrotic_ratio = float(np.count_nonzero(necrotic_mask)) / max(plant_pixels, 1)
 
         # Nitrogen chlorosis: uniform pale green/yellow across the leaf
         chlorosis_mask = (veg_g > 0.48) & (veg_r > 0.44) & (veg_b > 0.22) & (veg_g > veg_r)
-        chlorosis_ratio = float(np.count_nonzero(chlorosis_mask)) / max(veg_pixels, 1)
+        chlorosis_ratio = float(np.count_nonzero(chlorosis_mask)) / max(plant_pixels, 1)
 
         # Mildew / white coating: high brightness in all channels on plant
         mildew_mask = (veg_r > 0.65) & (veg_g > 0.65) & (veg_b > 0.65)
-        mildew_ratio = float(np.count_nonzero(mildew_mask)) / max(veg_pixels, 1)
+        mildew_ratio = float(np.count_nonzero(mildew_mask)) / max(plant_pixels, 1)
 
         # Select diagnosis matching the strongest spectral anomaly
         if yellow_ratio > 0.08:
@@ -182,6 +386,8 @@ def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> 
 
         return {
             "detected": True,
+            "category": "healthy" if diag is AGRONOMIC_DISEASES[5] else "disease",
+            "object_name": diag["name"],
             "crop": diag["crop"],
             "diagnosis": diag["name"],
             "pathogen": diag["pathogen"],
@@ -198,6 +404,8 @@ def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> 
     except Exception as exc:
         return {
             "detected": False,
+            "category": "none",
+            "object_name": "Ошибка анализа",
             "crop": "Ошибка анализа",
             "diagnosis": "Не удалось распознать структуру снимка",
             "pathogen": str(exc),
@@ -210,6 +418,797 @@ def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> 
             "weather_limits": "—",
             "yield_loss": "—",
         }
+
+
+# ---------------------------------------------------------------------------
+# Задача 3.2 — Оценка густоты стояния и подсчёт всходов по фото (в т.ч. с дрона)
+# ---------------------------------------------------------------------------
+
+# Агрономические нормы оптимальной густоты стояния (растений/м²) по культурам,
+# Северный Казахстан, богарное земледелие.
+STAND_NORMS = {
+    "яровая пшеница": (250, 350),
+    "озимая пшеница": (300, 450),
+    "ячмень": (250, 300),
+    "овес": (300, 400),
+    "рапс": (60, 100),
+    "подсолнечник": (4, 6),
+    "кукуруза": (6, 9),
+    "лен": (400, 600),
+    "горох": (80, 120),
+    "чечевица": (100, 130),
+    "соя": (30, 45),
+    "картофель": (4, 6),
+    "гречиха": (150, 250),
+    "просо": (150, 250),
+}
+
+
+_STAND_PROMPT = (
+    "Ты — эксперт по агроскаутингу и дистанционной оценке посевов Tanap AI "
+    "для Северного и Центрального Казахстана. Тебе дан материал посева: наземное фото рядков, "
+    "макро-кадр, ортоснимок/кадр с квадрокоптера (вид сверху) ЛИБО видео облёта поля дроном.\n\n"
+    "ЗАДАЧА: посчитать видимые всходы. Если это ВИДЕО — рассматривай наиболее чёткие "
+    "репрезентативные кадры и верни типичное число видимых растений в одном кадре.\n\n"
+    "ПРАВИЛО 1 (валидация): если на материале НЕ посев/поле/всходы (экран, интерьер, человек, техника, "
+    "один лист крупным планом без возможности счёта рядков) — верни detected=false, is_field=false.\n\n"
+    "ПРАВИЛО 2 (подсчёт): перечисли и посчитай только различимые всходы/растения в типичном кадре. "
+    "Оцени тип съёмки (shot_type): \"ground\" или \"drone\". Не угадывай площадь кадра, плотность "
+    "на м²/га, процент пропусков или вероятность точности: без масштаба эти величины не измеримы.\n\n"
+    "ПРАВИЛО 3 (агрооценка): определи вероятную культуру (crop) и только категориально оцени "
+    "равномерность видимых рядков (uniformity: low|moderate|high).\n\n"
+    "Верни СТРОГО валидный JSON:\n"
+    "{\n"
+    '  "detected": true,\n'
+    '  "is_field": true,\n'
+    '  "shot_type": "ground | drone",\n'
+    '  "crop": "Название культуры или \'—\'",\n'
+    '  "plant_count": 128,\n'
+    '  "uniformity": "low | moderate | high",\n'
+    '  "assessment": "Краткий вывод только по видимым растениям и равномерности кадра",\n'
+    '  "recommendation": "Как повторить учёт на нескольких калиброванных площадках"\n'
+    "}\n"
+)
+
+
+def _stand_unavailable(message: str) -> dict[str, Any]:
+    return {
+        "detected": False,
+        "is_field": False,
+        "shot_type": "—",
+        "crop": "—",
+        "plant_count": 0,
+        "frame_area_m2": None,
+        "density_per_m2": None,
+        "density_per_ha": None,
+        "optimal_range_m2": "—",
+        "stand_rating": "none",
+        "uniformity": "—",
+        "gap_percent": None,
+        "confidence": None,
+        "measurement_basis": "unavailable",
+        "assessment": message,
+        "recommendation": "—",
+    }
+
+
+def _normalize_stand_result(
+    parsed: dict[str, Any], calibrated_area_m2: float | None = None
+) -> dict[str, Any]:
+    """Приводит сырой JSON Gemini к стабильной схеме результата густоты стояния."""
+    detected = bool(parsed.get("detected", True))
+    is_field = bool(parsed.get("is_field", detected))
+    if not detected or not is_field:
+        return {
+            "detected": False,
+            "is_field": False,
+            "shot_type": "—",
+            "crop": "—",
+            "plant_count": 0,
+            "frame_area_m2": calibrated_area_m2,
+            "density_per_m2": None,
+            "density_per_ha": None,
+            "optimal_range_m2": "—",
+            "stand_rating": "none",
+            "uniformity": "—",
+            "gap_percent": None,
+            "confidence": None,
+            "measurement_basis": "user_calibrated_area" if calibrated_area_m2 else "visual_count_unscaled",
+            "assessment": str(parsed.get("assessment") or "На материале не обнаружено посева/всходов."),
+            "recommendation": "Снимите рядки всходов крупным планом или сделайте облёт участка дроном при дневном свете.",
+        }
+
+    shot_type = str(parsed.get("shot_type") or "ground").lower().strip()
+    if shot_type not in ["ground", "drone"]:
+        shot_type = "drone" if "drone" in shot_type or "air" in shot_type else "ground"
+
+    plant_count = int(round(float(parsed.get("plant_count", 0) or 0)))
+    frame_area = round(calibrated_area_m2, 3) if calibrated_area_m2 else None
+    density = round(plant_count / frame_area, 1) if frame_area else None
+    density_ha = int(round(density * 10000)) if density is not None else None
+
+    crop = str(parsed.get("crop") or "—").strip()
+    crop_key = crop.lower()
+    norm = None
+    for key, rng in STAND_NORMS.items():
+        if key in crop_key:
+            norm = rng
+            break
+    optimal_range = str(parsed.get("optimal_range_m2") or "").strip()
+    if not optimal_range and norm:
+        optimal_range = f"{norm[0]}–{norm[1]}"
+    optimal_range = optimal_range or "—"
+
+    stand_rating = "none"
+    if norm and density is not None:
+        if density < norm[0]:
+            stand_rating = "sparse"
+        elif density > norm[1]:
+            stand_rating = "dense"
+        else:
+            stand_rating = "optimal"
+
+    uniformity = str(parsed.get("uniformity") or "moderate").lower().strip()
+    if uniformity not in ["low", "moderate", "high"]:
+        uniformity = "moderate"
+
+    return {
+        "detected": True,
+        "is_field": True,
+        "shot_type": shot_type,
+        "crop": crop or "Сельхозкультура",
+        "plant_count": max(plant_count, 0),
+        "frame_area_m2": frame_area,
+        "density_per_m2": density,
+        "density_per_ha": density_ha,
+        "optimal_range_m2": optimal_range,
+        "stand_rating": stand_rating,
+        "uniformity": uniformity,
+        "gap_percent": None,
+        "confidence": None,
+        "measurement_basis": "user_calibrated_area" if frame_area else "visual_count_unscaled",
+        "assessment": str(parsed.get("assessment") or "Оценка густоты стояния выполнена."),
+        "recommendation": str(parsed.get("recommendation") or "—"),
+    }
+
+
+def _call_gemini_stand(
+    media_part: dict[str, Any] | list[dict[str, Any]],
+    timeout: float = 25.0,
+    calibrated_area_m2: float | None = None,
+) -> dict[str, Any] | None:
+    """Send stand-count media with one total deadline across the model cascade."""
+    media_parts = media_part if isinstance(media_part, list) else [media_part]
+    payload = {
+        "contents": [{"parts": [{"text": _STAND_PROMPT}, *media_parts]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+    deadline = time.monotonic() + timeout
+    for model_name in VISION_MODELS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1.0:
+            break
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            request_timeout = min(remaining, 14.0)
+            with httpx.Client(timeout=httpx.Timeout(request_timeout, connect=min(5.0, request_timeout))) as client:
+                resp = client.post(url, json=payload)
+                if resp.status_code != 200:
+                    continue
+                raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return _normalize_stand_result(json.loads(raw_json), calibrated_area_m2)
+        except Exception:
+            continue
+    return None
+
+
+def _query_gemini_stand_count(
+    image_bytes: bytes, calibrated_area_m2: float | None = None
+) -> dict[str, Any] | None:
+    """Подсчёт всходов и густоты стояния по фото поля / кадру с дрона (inline image)."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        im.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=88)
+        b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return _call_gemini_stand(
+            {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+            calibrated_area_m2=calibrated_area_m2,
+        )
+    except Exception:
+        return None
+
+
+def _query_gemini_stand_count_frames(
+    frame_bytes: list[bytes], calibrated_area_m2: float | None = None
+) -> dict[str, Any] | None:
+    """
+    Быстрый путь: анализ нескольких репрезентативных кадров, извлечённых на телефоне,
+    без загрузки всего видео (в разы быстрее по слабому интернету).
+    """
+    if not GEMINI_API_KEY or not frame_bytes:
+        return None
+
+    media_parts: list[dict[str, Any]] = []
+    try:
+        for raw_frame in frame_bytes[:4]:
+            image = Image.open(io.BytesIO(raw_frame)).convert("RGB")
+            image.thumbnail((960, 960), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=82, optimize=True)
+            media_parts.append({
+                "inlineData": {
+                    "mimeType": "image/jpeg",
+                    "data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+                }
+            })
+    except Exception:
+        return None
+
+    if not media_parts:
+        return None
+    return _call_gemini_stand(
+        media_parts, timeout=30.0, calibrated_area_m2=calibrated_area_m2
+    )
+
+
+def _gemini_upload_video_file(video_bytes: bytes, mime_type: str) -> str | None:
+    """
+    Загружает видео через Files API (resumable) и ждёт состояния ACTIVE.
+    Возвращает file_uri для ссылки в generateContent или None при сбое.
+    """
+    try:
+        size = len(video_bytes)
+        with httpx.Client(timeout=httpx.Timeout(60.0, connect=6.0)) as client:
+            start = client.post(
+                f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}",
+                headers={
+                    "X-Goog-Upload-Protocol": "resumable",
+                    "X-Goog-Upload-Command": "start",
+                    "X-Goog-Upload-Header-Content-Length": str(size),
+                    "X-Goog-Upload-Header-Content-Type": mime_type,
+                    "Content-Type": "application/json",
+                },
+                json={"file": {"display_name": "stand_video"}},
+            )
+            upload_url = start.headers.get("x-goog-upload-url") or start.headers.get("X-Goog-Upload-URL")
+            if not upload_url:
+                return None
+
+            up = client.post(
+                upload_url,
+                headers={
+                    "Content-Length": str(size),
+                    "X-Goog-Upload-Offset": "0",
+                    "X-Goog-Upload-Command": "upload, finalize",
+                },
+                content=video_bytes,
+            )
+            info = up.json().get("file", {})
+            name = info.get("name")
+            file_uri = info.get("uri")
+            state = info.get("state")
+            if not name or not file_uri:
+                return None
+
+            # Опрос состояния до ACTIVE (видео обрабатывается несколько секунд)
+            for _ in range(20):
+                if state == "ACTIVE":
+                    return file_uri
+                if state == "FAILED":
+                    return None
+                time.sleep(1.0)
+                poll = client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/{name}?key={GEMINI_API_KEY}"
+                )
+                pj = poll.json()
+                state = pj.get("state")
+                file_uri = pj.get("uri", file_uri)
+            return file_uri if state == "ACTIVE" else None
+    except Exception:
+        return None
+
+
+def _query_gemini_stand_count_video(video_bytes: bytes, mime_type: str = "video/mp4") -> dict[str, Any] | None:
+    """
+    Подсчёт всходов и густоты по ВИДЕО (в т.ч. облёт дроном).
+    Малые ролики — inline; крупные — через Files API. Кадрирование fps=1, первые 15с.
+    """
+    if not GEMINI_API_KEY:
+        return None
+    if not mime_type or not mime_type.startswith("video/"):
+        mime_type = "video/mp4"
+
+    # Метаданные видео: 1 кадр/с, первые 15с — ограничивает объём и держит отклик быстрым
+    video_meta = {"fps": 1, "start_offset": "0s", "end_offset": "15s"}
+    try:
+        # Inline допустим только при суммарном размере запроса < 20 МБ (base64 +33%).
+        if len(video_bytes) < 14_000_000:
+            b64_data = base64.b64encode(video_bytes).decode("utf-8")
+            part = {
+                "inlineData": {"mimeType": mime_type, "data": b64_data},
+                "videoMetadata": video_meta,
+            }
+            result = _call_gemini_stand(part, timeout=32.0)
+            if result is not None:
+                return result
+            # если inline не прошёл (напр. великоват) — пробуем Files API
+
+        # Крупные ролики (облёт дроном) — через Files API
+        file_uri = _gemini_upload_video_file(video_bytes, mime_type)
+        if not file_uri:
+            return None
+        part = {
+            "fileData": {"mimeType": mime_type, "fileUri": file_uri},
+            "videoMetadata": video_meta,
+        }
+        return _call_gemini_stand(part, timeout=40.0)
+    except Exception:
+        return None
+
+
+def count_seedlings_in_image_bytes(
+    image_bytes: bytes,
+    filename: str = "field.jpg",
+    calibrated_area_m2: float | None = None,
+) -> dict[str, Any]:
+    """
+    Задача 3.2: подсчёт всходов и оценка густоты стояния по ФОТО/кадру с дрона.
+    Строго Gemini Vision; при недоступности модели — честный отказ (без выдуманных чисел).
+    """
+    result = _query_gemini_stand_count(image_bytes, calibrated_area_m2)
+    if result is not None:
+        return result
+    return _stand_unavailable("Модель Gemini временно недоступна (превышен лимит запросов). Повторите через минуту.")
+
+
+def count_seedlings_in_video_bytes(
+    video_bytes: bytes, mime_type: str = "video/mp4", filename: str = "field.mp4"
+) -> dict[str, Any]:
+    """
+    Задача 3.2 (видео): подсчёт всходов и густоты по видеоролику, включая облёт квадрокоптером.
+    Строго Gemini (нативный анализ видео); при недоступности — честный отказ.
+    """
+    result = _query_gemini_stand_count_video(video_bytes, mime_type)
+    if result is not None:
+        return result
+    return _stand_unavailable("Не удалось проанализировать видео (модель Gemini недоступна или ролик слишком большой). Попробуйте короткий ролик или повторите позже.")
+
+
+def count_seedlings_in_video_frames(
+    frame_bytes: list[bytes],
+    filename: str = "field.mp4",
+    calibrated_area_m2: float | None = None,
+) -> dict[str, Any]:
+    """Задача 3.2 (видео, быстрый путь): подсчёт по кадрам, извлечённым на устройстве."""
+    result = _query_gemini_stand_count_frames(frame_bytes, calibrated_area_m2)
+    if result is not None:
+        return result
+    return _stand_unavailable(
+        "Не удалось проанализировать кадры видео (модель Gemini недоступна). Повторите через минуту при хорошем освещении."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Задача 3.3 — Контроль качества зерна по фото пробы
+# (сорная и зерновая примесь, битое и повреждённое зерно)
+# ---------------------------------------------------------------------------
+
+_GRAIN_PROMPT = (
+    "Ты — система предварительного визуального разбора фото зерновой пробы Tanap AI. "
+    "Тебе дано фото зерновой пробы (россыпь зерна на ровной поверхности).\n\n"
+    "ЗАДАЧА: оценить только видимый состав объектов в кадре. Это не лабораторный анализ по ГОСТ: "
+    "по фото нельзя определить массовую долю, влажность, белок, клейковину или класс зерна.\n\n"
+    "ПРАВИЛО 1 (валидация): если на фото НЕ зерновая проба (экран, интерьер, человек, растение в поле, "
+    "техника, посторонний предмет) — верни detected=false, is_grain=false.\n\n"
+    "ПРАВИЛО 2 (анализ): определи культуру (crop: пшеница, ячмень, овёс, рожь, рапс, подсолнечник, лён, "
+    "гречиха, просо, горох, чечевица и др.). Оцени приблизительные доли по числу/видимой площади "
+    "объектов в этом кадре (не по массе; сумма ≈ 100):\n"
+    "  • sound_percent — чистое доброкачественное (основное) зерно без дефектов;\n"
+    "  • weed_impurity_percent — СОРНАЯ примесь: минеральная (земля, камешки, песок), органическая "
+    "(частицы стеблей, плёнки, ости), семена сорняков, испорченное/гнилое зерно;\n"
+    "  • grain_impurity_percent — ЗЕРНОВАЯ примесь: щуплое, проросшее, недозрелое, давленое, зёрна других "
+    "культур, изъеденное зерно;\n"
+    "  • broken_percent — БИТОЕ/дроблёное зерно (механически расколотые, половинки);\n"
+    "  • damaged_percent — ПОВРЕЖДЁННОЕ зерно: клопом-черепашкой, плесенью, головнёй, самосогреванием "
+    "(потемневшее), морозобойное.\n\n"
+    "ПРАВИЛО 3 (оценка): оцени примерное число зёрен в кадре (grain_count) и только визуальное "
+    "состояние (quality_rating): \"good\" (визуально чистая), \"acceptable\" (смешанная), "
+    "\"poor\" (много видимых примесей/повреждений). Не присваивай класс зерна.\n\n"
+    "Верни СТРОГО валидный JSON:\n"
+    "{\n"
+    '  "detected": true,\n'
+    '  "is_grain": true,\n'
+    '  "crop": "Пшеница яровая",\n'
+    '  "grain_count": 240,\n'
+    '  "sound_percent": 92.0,\n'
+    '  "weed_impurity_percent": 2.0,\n'
+    '  "grain_impurity_percent": 3.5,\n'
+    '  "broken_percent": 1.5,\n'
+    '  "damaged_percent": 1.0,\n'
+    '  "grade": "Требуется лабораторный анализ",\n'
+    '  "quality_rating": "good | acceptable | poor",\n'
+    '  "assessment": "Краткий вывод по чистоте и повреждениям пробы",\n'
+    '  "recommendation": "Рекомендация (доработка на решётах, сушка, сепарация, условия хранения)"\n'
+    "}\n"
+)
+
+
+def _grain_unavailable(message: str) -> dict[str, Any]:
+    return {
+        "detected": False,
+        "is_grain": False,
+        "crop": "—",
+        "grain_count": 0,
+        "sound_percent": 0.0,
+        "weed_impurity_percent": 0.0,
+        "grain_impurity_percent": 0.0,
+        "broken_percent": 0.0,
+        "damaged_percent": 0.0,
+        "grade": "—",
+        "quality_rating": "none",
+        "confidence": None,
+        "measurement_basis": "unavailable",
+        "laboratory_grade_available": False,
+        "assessment": message,
+        "recommendation": "—",
+    }
+
+
+def _pct(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return round(max(0.0, min(100.0, float(value))), 1)
+    except Exception:
+        return None
+
+
+def _normalize_grain_result(parsed: dict[str, Any]) -> dict[str, Any]:
+    detected = bool(parsed.get("detected", True))
+    is_grain = bool(parsed.get("is_grain", detected))
+    if not detected or not is_grain:
+        return {
+            "detected": False,
+            "is_grain": False,
+            "crop": "—",
+            "grain_count": 0,
+            "sound_percent": 0.0,
+            "weed_impurity_percent": 0.0,
+            "grain_impurity_percent": 0.0,
+            "broken_percent": 0.0,
+            "damaged_percent": 0.0,
+            "grade": "—",
+            "quality_rating": "none",
+            "confidence": None,
+            "measurement_basis": "visual_area_estimate",
+            "laboratory_grade_available": False,
+            "assessment": str(parsed.get("assessment") or "На фото не обнаружено зерновой пробы."),
+            "recommendation": "Рассыпьте зерно тонким слоем на ровной однотонной поверхности и сфотографируйте крупным планом при дневном свете.",
+        }
+
+    weed = _pct(parsed.get("weed_impurity_percent"))
+    grain_imp = _pct(parsed.get("grain_impurity_percent"))
+    broken = _pct(parsed.get("broken_percent"))
+    damaged = _pct(parsed.get("damaged_percent"))
+    sound = _pct(parsed.get("sound_percent"))
+    defects = [weed, grain_imp, broken, damaged]
+    if sound is None and all(value is not None for value in defects):
+        sound = _pct(100.0 - sum(value for value in defects if value is not None))
+
+    rating = str(parsed.get("quality_rating") or "").lower().strip()
+    if rating not in ["good", "acceptable", "poor"]:
+        total_defect = sum(value for value in defects if value is not None)
+        if len([value for value in defects if value is not None]) < 4:
+            rating = "none"
+        elif total_defect <= 5:
+            rating = "good"
+        elif total_defect <= 15:
+            rating = "acceptable"
+        else:
+            rating = "poor"
+
+    return {
+        "detected": True,
+        "is_grain": True,
+        "crop": str(parsed.get("crop") or "Зерновая культура").strip() or "Зерновая культура",
+        "grain_count": max(int(round(float(parsed.get("grain_count", 0) or 0))), 0),
+        "sound_percent": sound,
+        "weed_impurity_percent": weed,
+        "grain_impurity_percent": grain_imp,
+        "broken_percent": broken,
+        "damaged_percent": damaged,
+        "grade": "Требуется лабораторный анализ",
+        "quality_rating": rating,
+        "confidence": None,
+        "measurement_basis": "visual_area_estimate",
+        "laboratory_grade_available": False,
+        "assessment": str(parsed.get("assessment") or "Оценка качества зерна выполнена."),
+        "recommendation": str(parsed.get("recommendation") or "—"),
+    }
+
+
+def _query_gemini_grain_quality(image_bytes: bytes) -> dict[str, Any] | None:
+    """Контроль качества зерна по фото пробы через Gemini Vision (каскад моделей)."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        im.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=90)
+        b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        return None
+
+    payload = {
+        "contents": [{"parts": [
+            {"text": _GRAIN_PROMPT},
+            {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+        ]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+    for model_name in VISION_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
+                resp = client.post(url, json=payload)
+                if resp.status_code != 200:
+                    continue
+                raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return _normalize_grain_result(json.loads(raw_json))
+        except Exception:
+            continue
+    return None
+
+
+def analyze_grain_quality_bytes(image_bytes: bytes, filename: str = "grain.jpg") -> dict[str, Any]:
+    """
+    Задача 3.3: контроль качества зерна по фото пробы (сорная/зерновая примесь, битое, повреждённое).
+    Строго Gemini Vision; при недоступности — честный отказ (без выдуманных чисел).
+    """
+    result = _query_gemini_grain_quality(image_bytes)
+    if result is not None:
+        return result
+    return _grain_unavailable("Модель Gemini временно недоступна (превышен лимит запросов). Повторите через минуту.")
+
+
+# ---------------------------------------------------------------------------
+# Задача 3.4 — Идентификация и подсчёт поголовья скота по изображению
+# (визуальная оценка: систематический счёт по сетке)
+# ---------------------------------------------------------------------------
+
+_LIVESTOCK_PROMPT = (
+    "Ты — система предварительного визуального подсчёта поголовья Tanap AI по фото (в т.ч. с дрона). "
+    "Главное — аккуратно оценить число видимых животных: не пропустить настоящих и не пересчитать одно "
+    "животное дважды и не принимать посторонние объекты за скот).\n\n"
+    "ПРАВИЛО 1 (валидация): если на фото НЕТ животных (пустое поле, экран, интерьер, техника, только люди) — "
+    "верни detected=false, is_livestock=false, animals=[], total_count=0.\n\n"
+    "ПРАВИЛО 2 (ГЛАВНАЯ МЕТОДИКА — ПОШТУЧНОЕ ПЕРЕЧИСЛЕНИЕ):\n"
+    "  Не называй число «на глаз». Вместо этого составь СПИСОК каждого отдельного животного (массив animals). "
+    "Для каждого животного — один элемент: {id, name (рус.), name_en, location (где оно в кадре: "
+    "'слева спереди', 'центр, лежит', 'вдали справа' и т.п.)}.\n"
+    "  Правила списка:\n"
+    "   • Одно РЕАЛЬНОЕ животное = РОВНО ОДИН элемент. Считай по головам/телам.\n"
+    "   • Включай частично перекрытых, лежащих, стоящих спиной, на самом краю кадра, мелких и далёких.\n"
+    "   • НЕ добавляй элемент для: тени, отражения в воде, пятна на земле, куста, камня, столба, "
+    "человека, собаки-пастуха, техники. Если объект СОМНИТЕЛЕН (не уверен, что это животное) — НЕ добавляй.\n"
+    "   • НЕ дублируй: если одно животное частично видно за другим — это всё равно ОДНО животное, один элемент. "
+    "Различай перекрывающихся животных по отдельным головам/ногам, но не удваивай одно и то же тело.\n\n"
+    "ПРАВИЛО 3 (САМОПРОВЕРКА — обязательно перед ответом):\n"
+    "  Перечитай свой список animals и проверь: (а) нет ли двух элементов на одно и то же животное (дубли) — "
+    "удали дубли; (б) нет ли элементов на тень/человека/собаку/предмет — удали их; (в) не пропущено ли явно "
+    "видимое животное — добавь. total_count ДОЛЖЕН строго равняться числу элементов в animals.\n\n"
+    "ПРАВИЛО 4 (очень плотное стадо, >60 голов): если поштучно перечислить физически невозможно, перечисли "
+    "сколько сможешь по краям, а для плотной массы оцени числом по рядам×колонкам; в count_range укажи "
+    "реалистичный диапазон.\n\n"
+    "Возможные виды (name_en): cattle (КРС), sheep (овцы), goat (козы), horse (лошади), pig (свиньи), "
+    "camel (верблюды), poultry (птица), buffalo (буйволы/яки).\n\n"
+    "Верни СТРОГО валидный JSON:\n"
+    "{\n"
+    '  "detected": true,\n'
+    '  "is_livestock": true,\n'
+    '  "shot_type": "ground | drone",\n'
+    '  "animals": [\n'
+    '    {"id": 1, "name": "Корова", "name_en": "cattle", "location": "слева, стоит боком"},\n'
+    '    {"id": 2, "name": "Корова", "name_en": "cattle", "location": "центр, лежит"}\n'
+    "  ],\n"
+    '  "total_count": 2,\n'
+    '  "crowding": "low | moderate | high",\n'
+    '  "count_range": "7–7",\n'
+    '  "assessment": "Краткий вывод: сколько и каких животных, что влияло на точность",\n'
+    '  "recommendation": "Совет для более точного подсчёта, если нужно"\n'
+    "}\n"
+)
+
+_SPECIES_EN = ["cattle", "sheep", "goat", "horse", "pig", "camel", "poultry", "buffalo", "other"]
+
+
+def _livestock_unavailable(message: str) -> dict[str, Any]:
+    return {
+        "detected": False,
+        "is_livestock": False,
+        "shot_type": "—",
+        "total_count": 0,
+        "species": [],
+        "dominant_species": "—",
+        "crowding": "—",
+        "confidence": None,
+        "measurement_basis": "unavailable",
+        "count_method": "unavailable",
+        "count_range": "—",
+        "assessment": message,
+        "recommendation": "—",
+    }
+
+
+def _normalize_livestock_result(parsed: dict[str, Any]) -> dict[str, Any]:
+    detected = bool(parsed.get("detected", True))
+    is_livestock = bool(parsed.get("is_livestock", detected))
+    if not detected or not is_livestock:
+        return {
+            "detected": False,
+            "is_livestock": False,
+            "shot_type": "—",
+            "total_count": 0,
+            "species": [],
+            "dominant_species": "—",
+            "crowding": "—",
+            "confidence": None,
+            "measurement_basis": "visual_model_count",
+            "count_method": "enumerated",
+            "count_range": "—",
+            "assessment": str(parsed.get("assessment") or "На фото не обнаружено скота."),
+            "recommendation": "Сфотографируйте стадо целиком при хорошем освещении или снимите сверху с дрона.",
+        }
+
+    # Канонические русские названия видов по name_en
+    species_ru = {
+        "cattle": "Крупный рогатый скот",
+        "sheep": "Овцы",
+        "goat": "Козы",
+        "horse": "Лошади",
+        "pig": "Свиньи",
+        "camel": "Верблюды",
+        "poultry": "Птица",
+        "buffalo": "Буйволы / яки",
+        "other": "Другие животные",
+    }
+
+    def _norm_species_en(raw: Any) -> str:
+        s = str(raw or "").lower().strip()
+        return s if s in _SPECIES_EN else "other"
+
+    species_out: list[dict[str, Any]] = []
+    total = 0
+
+    # ГЛАВНЫЙ путь: поштучный список animals — total = число элементов, виды агрегируем из списка
+    raw_animals = parsed.get("animals")
+    if isinstance(raw_animals, list) and raw_animals:
+        counts: dict[str, int] = {}
+        display_name: dict[str, str] = {}
+        for item in raw_animals:
+            if not isinstance(item, dict):
+                continue
+            name_en = _norm_species_en(item.get("name_en"))
+            counts[name_en] = counts.get(name_en, 0) + 1
+            if name_en not in display_name:
+                nm = str(item.get("name") or "").strip()
+                display_name[name_en] = nm or species_ru.get(name_en, "Животное")
+            total += 1
+        # Порядок по убыванию количества
+        for name_en, cnt in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            species_out.append({
+                "name": species_ru.get(name_en, display_name.get(name_en, "Животное")),
+                "name_en": name_en,
+                "count": cnt,
+            })
+    else:
+        # Резервный путь (очень плотное стадо): агрегированные виды + total_count
+        raw_species = parsed.get("species")
+        if isinstance(raw_species, list):
+            for item in raw_species:
+                if not isinstance(item, dict):
+                    continue
+                name_en = _norm_species_en(item.get("name_en"))
+                name = str(item.get("name") or species_ru.get(name_en, "")).strip()
+                if not name:
+                    continue
+                try:
+                    count = max(int(round(float(item.get("count", 0) or 0))), 0)
+                except Exception:
+                    count = 0
+                species_out.append({"name": name, "name_en": name_en, "count": count})
+        species_sum = sum(s["count"] for s in species_out)
+        try:
+            total = int(round(float(parsed.get("total_count", 0) or 0)))
+        except Exception:
+            total = 0
+        if species_sum > 0 and (total <= 0 or abs(total - species_sum) > max(2, int(species_sum * 0.1))):
+            total = species_sum
+        total = max(total, species_sum, 0)
+
+    shot_type = str(parsed.get("shot_type") or "ground").lower().strip()
+    if shot_type not in ["ground", "drone"]:
+        shot_type = "drone" if "drone" in shot_type or "air" in shot_type else "ground"
+
+    crowding = str(parsed.get("crowding") or "moderate").lower().strip()
+    if crowding not in ["low", "moderate", "high"]:
+        crowding = "moderate"
+
+    dominant = str(parsed.get("dominant_species") or "").strip()
+    if not dominant and species_out:
+        dominant = max(species_out, key=lambda s: s["count"])["name"]
+    dominant = dominant or "—"
+
+    return {
+        "detected": True,
+        "is_livestock": True,
+        "shot_type": shot_type,
+        "total_count": total,
+        "species": species_out,
+        "dominant_species": dominant,
+        "crowding": crowding,
+        "confidence": None,
+        "measurement_basis": "visual_model_count",
+        "count_method": "enumerated" if isinstance(raw_animals, list) and raw_animals else "dense_estimate",
+        "count_range": str(parsed.get("count_range") or "").strip() or "—",
+        "assessment": str(parsed.get("assessment") or "Подсчёт поголовья выполнен."),
+        "recommendation": str(parsed.get("recommendation") or "—"),
+    }
+
+
+def _query_gemini_livestock(image_bytes: bytes) -> dict[str, Any] | None:
+    """
+    Предварительный визуальный подсчёт поголовья скота через Gemini Vision.
+    Высокое разрешение (видно далёких/мелких животных) + систематический счёт по сетке.
+    """
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # Высокое разрешение критично для подсчёта: мелкие/далёкие животные должны остаться различимы
+        im.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=92)
+        b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        return None
+
+    payload = {
+        "contents": [{"parts": [
+            {"text": _LIVESTOCK_PROMPT},
+            {"inlineData": {"mimeType": "image/jpeg", "data": b64_data}},
+        ]}],
+        # temperature 0 reduces answer variance; it does not calibrate accuracy.
+        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+    }
+    for model_name in VISION_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+                resp = client.post(url, json=payload)
+                if resp.status_code != 200:
+                    continue
+                raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return _normalize_livestock_result(json.loads(raw_json))
+        except Exception:
+            continue
+    return None
+
+
+def count_livestock_in_image_bytes(image_bytes: bytes, filename: str = "herd.jpg") -> dict[str, Any]:
+    """
+    Задача 3.4: идентификация и предварительный визуальный подсчёт скота по фото.
+    Строго Gemini Vision; при недоступности — честный отказ (без выдуманных чисел).
+    """
+    result = _query_gemini_livestock(image_bytes)
+    if result is not None:
+        return result
+    return _livestock_unavailable("Модель Gemini временно недоступна (превышен лимит запросов). Повторите через минуту.")
 
 
 # ---------------------------------------------------------------------------
@@ -264,21 +1263,115 @@ OFFLINE_KNOWLEDGE_FAQ = [
 ]
 
 
-def ask_agronomic_advisor(question: str, history: list[dict[str, str]] | None = None) -> str:
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
+
+AGRONOMIST_SYSTEM_PROMPT = (
+    "Ты — профессиональный ведущий AI-агроном Tanap AI для Северного и Центрального Казахстана "
+    "(Акмолинская, Костанайская, Северо-Казахстанская области).\n"
+    "Твоя задача — давать практические консультации, ясно отделяя наблюдения пользователя, расчёты и гипотезы.\n"
+    "Правила формирования ответов:\n"
+    "1. Отвечай подробно, профессионально, на русском языке, используя структурированные пункты.\n"
+    "2. Не придумывай полевые измерения, проценты поражения, урожайность, экономию, вероятность или уверенность.\n"
+    "3. По фото говори только о визуальных признаках и альтернативных причинах; диагноз требует полевого подтверждения.\n"
+    "4. Не выдавай универсальную норму СЗР или удобрения. Норма зависит от культуры, фазы, вредного объекта, "
+    "формуляции и действующей этикетки конкретного зарегистрированного препарата.\n"
+    "5. Если исходных данных недостаточно, перечисли, что нужно измерить. Любые численные ориентиры явно "
+    "помечай как справочные и проси проверить актуальный регламент Казахстана и этикетку препарата."
+)
+
+
+def query_local_ollama(prompt: str) -> str | None:
+    """
+    Sends the user query to the local neural LLM running on the Mac via Ollama.
+    Includes guard against degenerative token repetition loops.
+    """
+    try:
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "system": AGRONOMIST_SYSTEM_PROMPT,
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "repeat_penalty": 1.25,
+                "num_predict": 450,
+            },
+        }
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(f"{OLLAMA_URL}/api/generate", json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                res_text = data.get("response", "").strip()
+                # Guard against degenerate repetition loops (e.g. "1.1.1.1.1.1.1...")
+                if len(res_text) > 15:
+                    if "1.1.1.1" in res_text or "..." in res_text[:30] or res_text.count("1.") > 10:
+                        return None
+                    return res_text
+    except Exception:
+        return None
+    return None
+
+
+def _query_gemini_chat(question: str, history: list[dict[str, Any]] | None = None) -> str | None:
+    """
+    Queries Google Gemini for expert agronomic advice with automatic model fallback.
+    Uses high-speed multimodal models without unsupported thinking budgets.
+    """
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        contents: list[dict[str, Any]] = []
+        if history:
+            for msg in history:
+                role = "user" if msg.get("role") in ["user", "farmer"] or msg.get("sender") == "user" else "model"
+                text = str(msg.get("text") or msg.get("content") or "").strip()
+                if text:
+                    contents.append({"role": role, "parts": [{"text": text}]})
+
+        contents.append({"role": "user", "parts": [{"text": question.strip()}]})
+
+        payload = {
+            "contents": contents,
+            "systemInstruction": {
+                "parts": [{"text": AGRONOMIST_SYSTEM_PROMPT}]
+            },
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 800,
+            },
+        }
+
+        for model_name in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                with httpx.Client(timeout=20.0) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if len(text) > 10:
+                            return text
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return None
+
+
+def ask_agronomic_advisor(question: str, history: list[dict[str, Any]] | None = None) -> str:
     """
     Returns an expert agronomic answer based on regional guidelines, pathology, and field data.
+    Uses Google Gemini and fails honestly when the model is unavailable.
     """
-    clean_q = question.strip().lower()
+    # 1. Primary & Exclusive LLM: Google Gemini Cloud AI Cascade
+    gemini_reply = _query_gemini_chat(question, history)
+    if gemini_reply:
+        return gemini_reply
 
-    for pattern, answer in OFFLINE_KNOWLEDGE_FAQ:
-        if re.search(pattern, clean_q):
-            return answer
-
-    # General agronomic assistant fallback
     return (
-        f"По вашему вопросу о «{question.strip()}»:\n\n"
-        "1. **Мониторинг поля**: Сопоставьте симптом со спутниковыми индексами NDVI и влажностью NDMI в карточке участка.\n"
-        "2. **Осмотр очага**: Проведите выезд на точку с фотофиксацией листа и прикорневой зоны.\n"
-        "3. **Регламент**: Если обнаружено поражение свыше 5–10% биомассы, запланируйте обработку баковой смесью триазольного фунгицида с микроэлементами.\n"
-        "4. **Погодное окно**: Проверьте скорость ветра (< 4 м/с) и отсутствие температурного стресса (> 25°C)."
+        "AI-агроном сейчас недоступен. Я не буду подставлять заранее заготовленные нормы или диагнозы вместо ответа модели. "
+        "Сохраните вопрос и повторите запрос позже; срочное решение по СЗР подтвердите у агронома и по актуальной этикетке зарегистрированного препарата."
     )

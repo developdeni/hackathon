@@ -10,3 +10,7 @@ skills/
 no-slop-ui/
 skills-lock.json
 
+# Backend runtime data & satellite cache
+backend/data/sat_cache/
+backend/data/*.db*
+

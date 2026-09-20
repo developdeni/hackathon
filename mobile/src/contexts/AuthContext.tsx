@@ -1,7 +1,13 @@
 import { useContext, createContext, useCallback, useEffect, useState, ReactNode } from 'react';
 import { useRouter, useSegments } from 'expo-router';
-import { loginUser, registerUser, getMe } from '../services/api';
-import { clearToken, loadToken, saveToken } from '../services/auth';
+import { loginUser, registerUser, getMe, isAuthenticationError } from '../services/api';
+import {
+  clearAuthSession,
+  loadCachedUser,
+  loadToken,
+  saveCachedUser,
+  saveToken,
+} from '../services/auth';
 import { LoginInput, RegisterInput, User } from '../types/domain';
 
 type AuthContextValue = {
@@ -33,17 +39,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void (async () => {
       try {
-        const stored = await loadToken();
+        const [stored, cachedUser] = await Promise.all([loadToken(), loadCachedUser()]);
         if (stored) {
           setToken(stored);
-          const me = await getMe();
-          setUser(me);
+          if (cachedUser) setUser(cachedUser);
+          try {
+            const me = await getMe();
+            setUser(me);
+            await saveCachedUser(me);
+          } catch (error) {
+            // A network outage is not a logout. Clear only a token that the
+            // server explicitly rejects.
+            if (isAuthenticationError(error)) {
+              await clearAuthSession();
+              setToken(null);
+              setUser(null);
+            }
+          }
         }
       } catch {
-        // Token expired or server offline — clear it
-        await clearToken();
-        setToken(null);
-        setUser(null);
+        // Local storage can fail independently. Do not destroy a recoverable session.
       } finally {
         setIsLoading(false);
       }
@@ -54,18 +69,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isLoading) return;
     const inAuthGroup = segments[0] === 'auth';
-    if (!user && !inAuthGroup) {
+    if (!token && !user && !inAuthGroup) {
       // Not authenticated → send to login, clear any history
       router.replace('/auth/login');
     } else if (user && inAuthGroup) {
       // Authenticated but on auth screen → go home, clear history
       router.replace('/');
     }
-  }, [user, isLoading, segments, router]);
+  }, [user, token, isLoading, segments, router]);
 
   const login = useCallback(async (input: LoginInput) => {
     const response = await loginUser(input);
-    await saveToken(response.token);
+    await Promise.all([saveToken(response.token), saveCachedUser(response.user)]);
     setToken(response.token);
     setUser(response.user);
     // Explicitly navigate home and clear auth history
@@ -74,7 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(async (input: RegisterInput) => {
     const response = await registerUser(input);
-    await saveToken(response.token);
+    await Promise.all([saveToken(response.token), saveCachedUser(response.user)]);
     setToken(response.token);
     setUser(response.user);
     // Explicitly navigate home and clear auth history
@@ -82,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [router]);
 
   const logout = useCallback(async () => {
-    await clearToken();
+    await clearAuthSession();
     setToken(null);
     setUser(null);
     router.replace('/auth/login');
@@ -92,8 +107,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await getMe();
       setUser(me);
-    } catch {
-      // ignore refresh failures silently
+      await saveCachedUser(me);
+    } catch (error) {
+      if (isAuthenticationError(error)) {
+        await clearAuthSession();
+        setToken(null);
+        setUser(null);
+      }
     }
   }, []);
 

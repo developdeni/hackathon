@@ -96,16 +96,22 @@ export type RegisterInput = {
 
 export type SatelliteObservation = {
   date: string;
+  periodEnd?: string;
+  validPixelCount?: number;
   phase?: string;
   ndviMean: number;
-  ndviMedian: number;
+  ndviMedian: number | null;
   ndmiMean: number | null;
-  cloudCoveragePercent: number;
+  cloudCoveragePercent: number | null;
+  clearPixelPercent?: number | null;
+  reliability?: 'high' | 'medium' | 'low' | 'unknown';
+  ndviSpread?: number | null;
   anomalyDetected: boolean;
   anomalyFactor?: string;
 };
 
 export type SatelliteData = {
+  stale?: boolean;
   fieldId: string;
   status: 'ready' | 'pending';
   message?: string;
@@ -132,7 +138,7 @@ export type RiskZone = {
   persistenceStatus: string;
   ndviMean?: number;
   ndviDeficit: number;
-  ndmiDeficit: number;
+  ndmiDeficit: number | null;
   mainFactor: string;
   recommendation: string;
   centroid: Coordinate;
@@ -147,7 +153,7 @@ export type BenchmarkData = {
     targetInspectionHa: number;
     savedInspectionHa: number;
     reductionPercent: number;
-    estimatedSeasonSavingsKzt: number;
+    estimatedSeasonSavingsKzt: number | null;
   };
 };
 
@@ -161,6 +167,10 @@ export type NdviCell = {
 };
 
 export type ZonesData = {
+  stale?: boolean;
+  observationDate?: string;
+  periodEnd?: string;
+  coveragePercent?: number;
   fieldId: string;
   fieldName: string;
   totalFieldAreaHa: number;
@@ -195,7 +205,8 @@ export type LandUseClassification = {
 export type AutoBoundaryResult = {
   status: 'ready';
   method: string;
-  confidence: number;
+  qualityScore: number;
+  qualityScoreBasis: string;
   source: string;
   spatialResolutionMeters: number;
   analysisWindowDays: number;
@@ -217,39 +228,246 @@ export type AgroAlert = {
 };
 
 export type AgroWeather = {
+  message?: string;
+  observedAt?: string;
+  forecastStart?: string;
+  forecastEnd?: string;
   status: string;
   source: string;
   coordinates: Coordinate;
-  updatedAt: string;
+  updatedAt: string | null;
   current: {
-    temperature: number;
-    humidity: number;
-    windSpeed: number;
+    temperature: number | null;
+    humidity: number | null;
+    windSpeed: number | null;
   };
   forecast7d: {
-    maxTemp: number;
-    minTemp: number;
-    precipSum: number;
-    evapotranspiration: number;
-    gddSum?: number;
+    maxTemp: number | null;
+    minTemp: number | null;
+    precipSum: number | null;
+    evapotranspiration: number | null;
+    gddSum?: number | null;
+    waterBalance?: number | null;
   };
   alerts: AgroAlert[];
 };
 
+export type AiDiagnosisCategory = 'disease' | 'pest' | 'weed' | 'healthy' | 'none';
+
 export type AiDiagnosisResult = {
   detected: boolean;
+  category?: AiDiagnosisCategory;
+  object_name?: string;
   crop: string;
   diagnosis: string;
   pathogen: string;
   severity: 'low' | 'moderate' | 'high';
-  confidence: number;
-  affected_area_percent: number;
+  confidence: number | null;
+  affected_area_percent: number | null;
+  metric_basis?: 'visual_model_interpretation' | 'unavailable' | string;
   description?: string;
   recommendation: string;
   chemicals: string;
   rate: string;
   weather_limits: string;
   yield_loss: string;
+};
+
+export type StandRating = 'sparse' | 'optimal' | 'dense' | 'none';
+
+export type AiStandCountResult = {
+  detected: boolean;
+  is_field: boolean;
+  shot_type: 'ground' | 'drone' | '—' | string;
+  crop: string;
+  plant_count: number;
+  frame_area_m2: number | null;
+  density_per_m2: number | null;
+  density_per_ha: number | null;
+  optimal_range_m2: string;
+  stand_rating: StandRating;
+  uniformity: 'low' | 'moderate' | 'high' | '—' | string;
+  gap_percent: number | null;
+  confidence: number | null;
+  measurement_basis: 'user_calibrated_area' | 'visual_count_unscaled' | 'unavailable' | string;
+  assessment: string;
+  recommendation: string;
+};
+
+export type GrainQualityRating = 'good' | 'acceptable' | 'poor' | 'none';
+
+export type AiGrainQualityResult = {
+  detected: boolean;
+  is_grain: boolean;
+  crop: string;
+  grain_count: number;
+  sound_percent: number | null;
+  weed_impurity_percent: number | null;
+  grain_impurity_percent: number | null;
+  broken_percent: number | null;
+  damaged_percent: number | null;
+  grade: string;
+  quality_rating: GrainQualityRating;
+  confidence: number | null;
+  measurement_basis: 'visual_area_estimate' | 'unavailable' | string;
+  laboratory_grade_available: boolean;
+  assessment: string;
+  recommendation: string;
+};
+
+export type LivestockSpecies = {
+  name: string;
+  name_en: string;
+  count: number;
+};
+
+export type AiLivestockResult = {
+  detected: boolean;
+  is_livestock: boolean;
+  shot_type: 'ground' | 'drone' | '—' | string;
+  total_count: number;
+  species: LivestockSpecies[];
+  dominant_species: string;
+  crowding: 'low' | 'moderate' | 'high' | '—' | string;
+  confidence: number | null;
+  measurement_basis: 'visual_model_count' | 'unavailable' | string;
+  count_method: 'enumerated' | 'dense_estimate' | 'unavailable' | string;
+  count_range: string;
+  assessment: string;
+  recommendation: string;
+};
+
+export type ClimateRiskLevel = 'low' | 'moderate' | 'high';
+
+export type ClimateRiskDecade = {
+  label: string;
+  period: string;
+  is_past: boolean;
+  days_count: number;
+  overall_index: number;
+  overall_level: ClimateRiskLevel;
+  drought_index: number;
+  sukhovey_index: number;
+  early_snow_index: number;
+  mean_tmax: number;
+  min_tmin: number;
+  precip_sum: number;
+  factors: string[];
+};
+
+export type ClimateRiskAlert = {
+  type: 'drought' | 'sukhovey' | 'early_snow' | string;
+  level: 'warning' | 'critical';
+  title: string;
+  description: string;
+};
+
+export type ClimateRiskForecast = {
+  available: boolean;
+  source: string;
+  generated_at?: string;
+  decades: ClimateRiskDecade[];
+  alerts: ClimateRiskAlert[];
+  summary: string;
+};
+
+export type YieldHistorySource = 'farm_record' | 'partner' | 'official_stat';
+
+export type YieldHistoryRecord = {
+  id: string;
+  fieldId: string;
+  seasonYear: number;
+  cropType: string;
+  yieldTPerHa: number;
+  source: YieldHistorySource;
+  notes: string;
+  createdAt: string;
+};
+
+export type YieldForecastFactor = {
+  id: string;
+  label: string;
+  detail: string;
+  value: number;
+  contributionTPerHa: number;
+  direction: 'positive' | 'negative' | 'neutral';
+};
+
+export type YieldForecastSource = {
+  id: string;
+  name: string;
+  status: 'connected' | 'unavailable' | 'reference_only' | 'farm_records_only' | string;
+  role: string;
+};
+
+export type YieldForecast = {
+  stale?: boolean;
+  status: 'ready' | 'insufficient_data' | 'unavailable';
+  fieldId: string;
+  cropType: string;
+  seasonYear: number;
+  generatedAt: string;
+  forecastTPerHa: number | null;
+  interval80: { low: number; high: number } | null;
+  confidenceLevel: number;
+  modelQuality: 'preliminary' | 'medium' | 'high' | 'unavailable';
+  historyCount: number;
+  requiredHistoryCount: number;
+  method: string;
+  message: string;
+  missingData: string[];
+  validationMaeTPerHa?: number;
+  factors: YieldForecastFactor[];
+  inputs: Record<string, number | string> | null;
+  sources: YieldForecastSource[];
+};
+
+export type OperationWindow = {
+  start: string;
+  end: string;
+  score: number;
+  confidence: 'higher' | 'medium' | 'lower';
+  factors: string[];
+  risks: string[];
+  metrics: {
+    precipSum: number;
+    minTemperature: number;
+    maxWind: number;
+    soilTemperature: number | null;
+    soilMoisture: number | null;
+  };
+};
+
+export type FieldOperationRecommendation = {
+  type: 'sowing' | 'harvest';
+  title: string;
+  status: 'recommended' | 'watch' | 'verify_field' | 'no_window' | 'out_of_season';
+  calendar: string;
+  summary: string;
+  windows: OperationWindow[];
+};
+
+export type FieldOperationsRecommendation = {
+  stale?: boolean;
+  status: 'ready' | 'unavailable';
+  fieldId: string;
+  cropType: string;
+  cropProfile?: string;
+  generatedAt: string;
+  horizonStart: string | null;
+  horizonEnd: string | null;
+  fieldState: {
+    status: 'maturing' | 'approaching' | 'vegetating' | 'unknown';
+    label: string;
+    message: string;
+    latestNdvi: number | null;
+    peakNdvi: number | null;
+    declineFromPeak: number | null;
+    observationDate: string | null;
+  };
+  operations: FieldOperationRecommendation[];
+  source: string;
+  message: string;
 };
 
 export type AiChatMessage = {

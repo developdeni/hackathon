@@ -75,6 +75,7 @@ export default function RootLayout() {
         <Stack.Screen name="field/new" options={{ title: 'Новый участок', headerBackTitle: 'Назад' }} />
         <Stack.Screen name="field/[id]" options={{ title: 'Карточка поля', headerBackTitle: 'Назад' }} />
         <Stack.Screen name="field/[id]/new-inspection" options={{ title: 'Новый осмотр', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="field/[id]/yield-history" options={{ title: 'История урожайности', headerBackTitle: 'Назад' }} />
 
         {/* Inspection */}
         <Stack.Screen name="inspection/[id]" options={{ title: 'Осмотр', headerBackTitle: 'Назад' }} />

@@ -1,14 +1,19 @@
 import asyncio
+import hashlib
 import io
+import json
 import math
 import os
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 import httpx
 import numpy as np
 from PIL import Image
 from dotenv import load_dotenv
+from shapely.geometry import Polygon, box
+from .auth import compute_area_ha
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -23,20 +28,100 @@ PENDING_MESSAGE = "Ожидание снимка Sentinel-2: обработан�
 
 _series_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _series_inflight: dict[str, asyncio.Task[dict[str, Any] | None]] = {}
-_SERIES_TTL_SECONDS = 30 * 60
+# Sentinel-2 обновляется раз в ~5 дней, поэтому короткий TTL лишь плодит медленные
+# холодные загрузки. 6 часов безопасно и держит открытие поля мгновенным в течение дня.
+_SERIES_TTL_SECONDS = 6 * 3600
+
+# Cached OAuth token: (expires_at_ts, token). The Copernicus token lives ~10 min,
+# so re-fetching it on every satellite request wasted ~3.4s per cold field load.
+_token_cache: tuple[float, str] | None = None
+_token_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# Disk-persistent cache. Keeps satellite/grid results across backend restarts
+# (and --reload), so even a phone with an empty local cache gets an instant
+# server response instead of paying the ~14s Copernicus round-trip.
+# ---------------------------------------------------------------------------
+_DISK_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "sat_cache"
+try:
+    _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+
+
+def _disk_cache_path(kind: str, key: str) -> Path:
+    digest = hashlib.sha1(("quality-v3|" + key).encode("utf-8")).hexdigest()
+    return _DISK_CACHE_DIR / f"{kind}_{digest}.json"
+
+
+def _disk_cache_read(kind: str, key: str, ttl_seconds: float) -> dict[str, Any] | None:
+    try:
+        path = _disk_cache_path(kind, key)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - float(payload.get("ts", 0)) < ttl_seconds:
+            return payload.get("data")
+    except Exception:
+        return None
+    return None
+
+
+def _disk_cache_write(kind: str, key: str, data: dict[str, Any]) -> None:
+    try:
+        tmp = _disk_cache_path(kind, key).with_suffix(".tmp")
+        tmp.write_text(json.dumps({"ts": time.time(), "data": data}), encoding="utf-8")
+        tmp.replace(_disk_cache_path(kind, key))
+    except Exception:
+        pass
+
+
+# Shared HTTP client with keep-alive + connection pooling. Reusing one client
+# avoids a fresh TLS handshake on every Copernicus call — the single biggest
+# saving on a high-latency ("bad") network, where each handshake is several RTTs.
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(20.0, connect=6.0),
+            limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=300.0),
+            http2=False,
+        )
+    return _http_client
+
+
+async def close_http_client() -> None:
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
+    _http_client = None
 
 
 async def get_copernicus_token() -> str | None:
-    """Получение токена доступа через Copernicus OAuth (если заданы credentials)."""
+    """Получение токена доступа через Copernicus OAuth (кэшируется до истечения срока)."""
+    global _token_cache
+
     client_id = os.getenv("COPERNICUS_CLIENT_ID")
     client_secret = os.getenv("COPERNICUS_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         return None
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
+    now_ts = time.time()
+    cached = _token_cache
+    if cached and now_ts < cached[0]:
+        return cached[1]
+
+    async with _token_lock:
+        # Re-check inside the lock in case another request just refreshed it.
+        cached = _token_cache
+        if cached and time.time() < cached[0]:
+            return cached[1]
+        try:
+            resp = await _get_http_client().post(
                 COPERNICUS_TOKEN_URL,
                 data={
                     "grant_type": "client_credentials",
@@ -44,11 +129,18 @@ async def get_copernicus_token() -> str | None:
                     "client_secret": client_secret,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=httpx.Timeout(6.0, connect=6.0),
             )
             if resp.status_code == 200:
-                return resp.json().get("access_token")
-    except Exception:
-        pass
+                data = resp.json()
+                token = data.get("access_token")
+                if token:
+                    # Refresh 60s before real expiry; default 600s if not provided.
+                    expires_in = float(data.get("expires_in", 600))
+                    _token_cache = (time.time() + max(expires_in - 60, 30), token)
+                    return token
+        except Exception:
+            pass
     return None
 
 
@@ -77,13 +169,22 @@ async def fetch_field_satellite_series(field_id: str, boundary: list[dict[str, f
         return _pending_response(field_id)
 
     cache_key = field_id + "|" + ";".join(
-        f"{point['latitude']:.5f},{point['longitude']:.5f}" for point in boundary[:16]
+        f"{point['latitude']:.7f},{point['longitude']:.7f}" for point in boundary
     )
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = time.time()
+
+    # 1. Hot in-memory cache.
     cached = _series_cache.get(cache_key)
     if cached and now_ts - cached[0] < _SERIES_TTL_SECONDS:
         return cached[1]
 
+    # 2. Warm disk cache (survives restarts) — instant even for a phone with no local cache.
+    disk_fresh = _disk_cache_read("series", cache_key, _SERIES_TTL_SECONDS)
+    if disk_fresh:
+        _series_cache[cache_key] = (now_ts, disk_fresh)
+        return disk_fresh
+
+    # 3. Fetch live from Copernicus (the slow ~10s path), de-duplicated across callers.
     token = await get_copernicus_token()
     if token:
         try:
@@ -95,6 +196,7 @@ async def fetch_field_satellite_series(field_id: str, boundary: list[dict[str, f
             if live_data:
                 live_data["fieldId"] = field_id
                 _series_cache[cache_key] = (now_ts, live_data)
+                _disk_cache_write("series", cache_key, live_data)
                 return live_data
         except Exception:
             pass
@@ -103,17 +205,57 @@ async def fetch_field_satellite_series(field_id: str, boundary: list[dict[str, f
             if task is not None and task.done():
                 _series_inflight.pop(cache_key, None)
 
+    # 4. Network failed — return the last real data we ever saw (any age) rather than
+    #    an empty "pending" response, so a bad connection still shows actual figures.
+    stale = _disk_cache_read("series", cache_key, float("inf"))
+    if stale:
+        return {**stale, "stale": True, "message": "Обновление недоступно: показаны ранее полученные спутниковые данные."}
+
     return _pending_response(field_id)
 
 
-async def query_sentinel_hub_statistical(token: str, boundary: list[dict[str, float]]) -> dict[str, Any] | None:
+async def fetch_field_satellite_period(
+    boundary: list[dict[str, float]],
+    date_from: date,
+    date_to: date,
+) -> dict[str, Any] | None:
+    """Fetch a real field series for an explicit historical growing-season window."""
+    if not boundary or date_to <= date_from:
+        return None
+    boundary_key = ";".join(
+        f"{point['latitude']:.7f},{point['longitude']:.7f}" for point in boundary
+    )
+    cache_key = f"{boundary_key}|{date_from.isoformat()}|{date_to.isoformat()}"
+    cached = _disk_cache_read("season", cache_key, 30 * 24 * 3600)
+    if cached:
+        return cached
+    token = await get_copernicus_token()
+    if not token:
+        return None
+    try:
+        result = await query_sentinel_hub_statistical(token, boundary, date_from, date_to)
+    except Exception:
+        result = None
+    if result:
+        _disk_cache_write("season", cache_key, result)
+        return result
+    return _disk_cache_read("season", cache_key, float("inf"))
+
+
+async def query_sentinel_hub_statistical(
+    token: str,
+    boundary: list[dict[str, float]],
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any] | None:
     """Запрос в Sentinel Hub Statistical API и разбор реальной статистики NDVI/NDMI."""
     coordinates = [[p["longitude"], p["latitude"]] for p in boundary]
     if coordinates and coordinates[0] != coordinates[-1]:
         coordinates.append(coordinates[0])
 
     now = datetime.now(timezone.utc)
-    season_start = now - timedelta(days=210)
+    season_start = date_from or (now - timedelta(days=210)).date()
+    season_end = date_to or now.date()
     payload = {
         "input": {
             "bounds": {
@@ -133,40 +275,58 @@ async def query_sentinel_hub_statistical(token: str, boundary: list[dict[str, fl
             ],
         },
         "aggregation": {
+            "resx": RESOLUTION_M / (111320 * math.cos(math.radians(boundary[0]["latitude"]))),
+            "resy": RESOLUTION_M / 111320,
             "timeRange": {
                 "from": season_start.strftime("%Y-%m-%dT00:00:00Z"),
-                "to": now.strftime("%Y-%m-%dT00:00:00Z"),
+                "to": season_end.strftime("%Y-%m-%dT00:00:00Z"),
             },
-            "aggregationInterval": {"of": "P10D"},
+            "aggregationInterval": {"of": "P10D", "lastIntervalBehavior": "SHORTEN"},
             "evalscript": """
             //VERSION=3
             function setup() {
               return {
                 input: [{ bands: ["B04", "B08", "B11", "SCL", "dataMask"] }],
                 output: [
-                  { id: "ndvi", bands: 1 },
-                  { id: "ndmi", bands: 1 },
-                  { id: "dataMask", bands: 1 }
+                  { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
+                  { id: "ndmi", bands: 1, sampleType: "FLOAT32" },
+                  { id: "quality", bands: ["clear", "cloud"], sampleType: "FLOAT32" },
+                  { id: "dataMask", bands: ["ndvi", "ndmi", "quality"] }
                 ]
               };
             }
             function evaluatePixel(samples) {
-              let ndvi = (samples.B08 - samples.B04) / (samples.B08 + samples.B04);
-              let ndmi = (samples.B08 - samples.B11) / (samples.B08 + samples.B11);
-              return { ndvi: [ndvi], ndmi: [ndmi], dataMask: [samples.dataMask] };
+              // Пиксельная маска облаков по SCL: исключаем no-data(0), saturated(1),
+              // cloud shadow(3), cloud medium(8), cloud high(9), cirrus(10), snow/ice(11).
+              // Оставляем dark(2), vegetation(4), bare soil(5), water(6), unclassified(7).
+              var scl = samples.SCL;
+              var cloudy = (scl == 0) || (scl == 1) || (scl == 3) ||
+                           (scl == 8) || (scl == 9) || (scl == 10) || (scl == 11);
+              var valid = (samples.dataMask == 1 && !cloudy) ? 1 : 0;
+              var dV = samples.B08 + samples.B04;
+              var dM = samples.B08 + samples.B11;
+              var ndvi = dV != 0 ? (samples.B08 - samples.B04) / dV : 0;
+              var ndmi = dM != 0 ? (samples.B08 - samples.B11) / dM : 0;
+              // dataMask=0 у облачных пикселей — они исключаются из статистики (чистое среднее)
+              var cloud = (scl == 8 || scl == 9 || scl == 10) ? 1 : 0;
+              return { ndvi: [ndvi], ndmi: [ndmi], quality: [valid, cloud], dataMask: [valid, valid, samples.dataMask] };
             }
             """,
         },
+        # Реальные перцентили (робастная медиана p50 + разброс p10..p90) вместо среднего по мутным пикселям
+        "calculations": {
+            "ndvi": {"statistics": {"default": {"percentiles": {"k": [10, 50, 90]}}}},
+        },
     }
 
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        resp = await client.post(
-            SENTINEL_HUB_STAT_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-        if resp.status_code == 200:
-            return parse_statistical_response(resp.json())
+    resp = await _get_http_client().post(
+        SENTINEL_HUB_STAT_URL,
+        json=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        timeout=httpx.Timeout(14.0, connect=6.0),
+    )
+    if resp.status_code == 200:
+        return parse_statistical_response(resp.json())
     return None
 
 
@@ -464,12 +624,12 @@ async def auto_detect_arable_boundary(
         """,
     }
 
-    async with httpx.AsyncClient(timeout=18.0) as client:
-        resp = await client.post(
-            SENTINEL_HUB_PROCESS_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
+    resp = await _get_http_client().post(
+        SENTINEL_HUB_PROCESS_URL,
+        json=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        timeout=httpx.Timeout(18.0, connect=6.0),
+    )
     if resp.status_code != 200:
         raise RuntimeError("Sentinel Process API не вернул снимок для этой точки")
 
@@ -613,14 +773,15 @@ async def auto_detect_arable_boundary(
         needs_review = True
         warning = "Граница неоднородная и рваная. Контур построен как черновик — проверьте вершины по спутниковой карте."
     edge_quality = min(float(np.mean(edge_strength[perimeter_mask])) / (edge_limit * 1.5), 1.0) if perimeter_mask.any() else 0.0
-    confidence = max(0.32, min(0.93, 0.5 + edge_quality * 0.18 + compactness * 0.18 - _touching_edges(component) * 0.06))
+    quality_score = max(0.32, min(0.93, 0.5 + edge_quality * 0.18 + compactness * 0.18 - _touching_edges(component) * 0.06))
     if needs_review:
-        confidence = min(confidence, 0.49)
+        quality_score = min(quality_score, 0.49)
     seed_ndvi = float(seed_vector[0] * 1.35 - 0.35)
     return {
         "status": "ready",
         "method": "Sentinel-2 crop-field region growing + ordered edge contour",
-        "confidence": round(confidence, 2),
+        "qualityScore": round(quality_score, 2),
+        "qualityScoreBasis": "spectral edge support + shape compactness; not a probability",
         "source": "Copernicus Sentinel-2 Process API",
         "spatialResolutionMeters": RESOLUTION_M,
         "analysisWindowDays": 180,
@@ -642,53 +803,83 @@ def parse_statistical_response(raw: dict[str, Any]) -> dict[str, Any] | None:
     observations: list[dict[str, Any]] = []
     previous_ndvi: float | None = None
 
-    for entry in intervals:
+    for entry in sorted(intervals, key=lambda item: item.get("interval", {}).get("from", "")):
         outputs = entry.get("outputs", {})
-        ndvi_stats = outputs.get("ndvi", {}).get("bands", {}).get("B0", {}).get("stats")
+        ndvi_band = outputs.get("ndvi", {}).get("bands", {}).get("B0", {})
+        ndvi_stats = ndvi_band.get("stats")
         ndmi_stats = outputs.get("ndmi", {}).get("bands", {}).get("B0", {}).get("stats")
-        mask_stats = outputs.get("dataMask", {}).get("bands", {}).get("B0", {}).get("stats")
         if not ndvi_stats or ndvi_stats.get("sampleCount", 0) == 0:
             continue
 
-        sample_count = ndvi_stats.get("sampleCount", 0)
-        valid_count = mask_stats.get("sum") if mask_stats else None
-        cloud_pct = (
-            round((1 - valid_count / sample_count) * 100, 1)
-            if valid_count is not None and sample_count
-            else 0.0
-        )
+        clear_count = ndvi_stats.get("sampleCount", 0) - ndvi_stats.get("noDataCount", 0)
+        # sampleCount includes the bounding box outside the polygon. Only the
+        # geometry count is a valid denominator for field coverage.
+        geometry_count = entry.get("geometryPixelCount", raw.get("geometryPixelCount"))
+        clear_fraction = min(clear_count / geometry_count, 1.0) if isinstance(geometry_count, (int, float)) and geometry_count > 0 else None
+        quality = outputs.get("quality", {}).get("bands", {})
+        clear_mean = quality.get("clear", {}).get("stats", {}).get("mean")
+        cloud_mean = quality.get("cloud", {}).get("stats", {}).get("mean")
+        if isinstance(clear_mean, (int, float)) and math.isfinite(clear_mean):
+            clear_fraction = max(0.0, min(clear_mean, 1.0))
+        mean = ndvi_stats.get("mean")
+        if clear_count < 8 or not isinstance(mean, (int, float)) or not math.isfinite(mean) or not -1 <= mean <= 1:
+            continue
+        if clear_fraction is not None and clear_fraction < 0.3:
+            continue
 
-        ndvi_mean = round(ndvi_stats.get("mean", 0.0), 2)
-        ndmi_mean = round(ndmi_stats.get("mean", 0.0), 2) if ndmi_stats else None
-        anomaly = previous_ndvi is not None and (previous_ndvi - ndvi_mean) >= 0.12
+        # Реальная медиана (p50) устойчивее среднего к остаточным облакам/смешанным пикселям.
+        pcts = ndvi_stats.get("percentiles", {}) or {}
+        p50 = pcts.get("50.0")
+        p10 = pcts.get("10.0")
+        p90 = pcts.get("90.0")
+
+        ndvi_mean = round(mean, 3)
+        ndvi_median = round(p50, 3) if isinstance(p50, (int, float)) and math.isfinite(p50) and -1 <= p50 <= 1 else None
+        ndmi_value = ndmi_stats.get("mean") if ndmi_stats else None
+        ndmi_mean = round(ndmi_value, 3) if isinstance(ndmi_value, (int, float)) and math.isfinite(ndmi_value) and -1 <= ndmi_value <= 1 else None
+        # Разброс p10..p90 — индикатор неоднородности поля / достоверности
+        spread = round(p90 - p10, 3) if isinstance(p10, (int, float)) and isinstance(p90, (int, float)) else None
+        reliability = "unknown" if clear_fraction is None else "high" if clear_fraction >= 0.6 else "medium"
+
+        # Аномалию оцениваем по устойчивой медиане, а не по среднему
+        value = ndvi_median if ndvi_median is not None else ndvi_mean
+        anomaly = reliability == "high" and previous_ndvi is not None and (previous_ndvi - value) >= 0.12
 
         observation = {
             "date": entry.get("interval", {}).get("from", "")[:10],
+            "periodEnd": entry.get("interval", {}).get("to", "")[:10],
             "ndviMean": ndvi_mean,
-            "ndviMedian": round(ndvi_stats.get("mean", 0.0), 2),
+            "ndviMedian": ndvi_median,
             "ndmiMean": ndmi_mean,
-            "cloudCoveragePercent": cloud_pct,
+            "cloudCoveragePercent": round(cloud_mean * 100, 1) if isinstance(cloud_mean, (int, float)) and math.isfinite(cloud_mean) else None,
+            "clearPixelPercent": round(clear_fraction * 100, 1) if clear_fraction is not None else None,
+            "validPixelCount": clear_count,
+            "reliability": reliability,
+            "ndviSpread": spread,
             "anomalyDetected": anomaly,
         }
         if anomaly:
             observation["anomalyFactor"] = (
-                f"Снижение NDVI на {round(previous_ndvi - ndvi_mean, 2)} относительно предыдущего снимка"
+                f"NDVI снизился на {round(previous_ndvi - value, 2)} между периодами. Возможны уборка, созревание или стресс; причина требует проверки."
             )
         observations.append(observation)
-        previous_ndvi = ndvi_mean
+        previous_ndvi = value if reliability == "high" else None
 
     if not observations:
         return None
 
     return {
         "status": "ready",
+        "stale": False,
+        "aggregationDays": 10,
+        "qualityVersion": 2,
         "source": "Copernicus Data Space Ecosystem (Sentinel Hub Statistical API)",
         "mission": MISSION,
         "spatialResolutionMeters": RESOLUTION_M,
         "cloudMaskingMethod": CLOUD_MASK_METHOD,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "periodStart": observations[0]["date"],
-        "periodEnd": observations[-1]["date"],
+        "periodEnd": observations[-1]["periodEnd"],
         "observationCount": len(observations),
         "observations": observations,
     }
@@ -719,6 +910,9 @@ def _point_in_polygon(lat: float, lng: float, poly: list[dict[str, float]]) -> b
 
 
 def _build_grid_cells(boundary: list[dict[str, float]], cols: int, rows: int) -> list[dict[str, Any]]:
+    field_polygon = Polygon([(p["longitude"], p["latitude"]) for p in boundary])
+    if not field_polygon.is_valid or field_polygon.is_empty:
+        return []
     lats = [p["latitude"] for p in boundary]
     lngs = [p["longitude"] for p in boundary]
     min_lat, max_lat = min(lats), max(lats)
@@ -733,27 +927,24 @@ def _build_grid_cells(boundary: list[dict[str, float]], cols: int, rows: int) ->
             lat1 = min_lat + d_lat * (r + 1)
             lng0 = min_lng + d_lng * c
             lng1 = min_lng + d_lng * (c + 1)
-            centroid = {"latitude": (lat0 + lat1) / 2, "longitude": (lng0 + lng1) / 2}
-            # Оставляем только ячейки, центр которых реально внутри контура поля.
-            if not _point_in_polygon(centroid["latitude"], centroid["longitude"], boundary):
-                continue
-            cell_boundary = [
-                {"latitude": lat0, "longitude": lng0},
-                {"latitude": lat0, "longitude": lng1},
-                {"latitude": lat1, "longitude": lng1},
-                {"latitude": lat1, "longitude": lng0},
-            ]
-            cells.append({
-                "row": r,
-                "col": c,
-                "centroid": centroid,
-                "boundary": cell_boundary,
-            })
+            clipped = field_polygon.intersection(box(lng0, lat0, lng1, lat1))
+            parts = [clipped] if clipped.geom_type == "Polygon" else getattr(clipped, "geoms", [])
+            for part_index, part in enumerate(parts):
+                if part.is_empty or part.geom_type != "Polygon" or part.interiors:
+                    continue
+                cell_boundary = [{"latitude": y, "longitude": x} for x, y in list(part.exterior.coords)[:-1]]
+                point = part.representative_point()
+                cells.append({
+                    "row": r, "col": f"{c}-{part_index}",
+                    "areaHa": compute_area_ha(cell_boundary),
+                    "centroid": {"latitude": point.y, "longitude": point.x},
+                    "boundary": cell_boundary,
+                })
     return cells
 
 
 def _cache_key(boundary: list[dict[str, float]], cols: int, rows: int) -> str:
-    pts = ";".join(f"{p['latitude']:.5f},{p['longitude']:.5f}" for p in boundary[:8])
+    pts = ";".join(f"{p['latitude']:.7f},{p['longitude']:.7f}" for p in boundary)
     return f"{cols}x{rows}|{pts}"
 
 
@@ -772,42 +963,71 @@ async def fetch_field_risk_grid(
         return None
 
     key = _cache_key(boundary, cols, rows)
-    now = datetime.now(timezone.utc).timestamp()
+    now = time.time()
     cached = _grid_cache.get(key)
     if cached and (now - cached[0]) < _GRID_TTL_SECONDS:
         return cached[1]
 
+    disk_fresh = _disk_cache_read("grid", key, _GRID_TTL_SECONDS)
+    if disk_fresh:
+        _grid_cache[key] = (now, disk_fresh)
+        return disk_fresh
+
     token = await get_copernicus_token()
     if not token:
-        return None
+        stale = _disk_cache_read("grid", key, float("inf"))
+        return {**stale, "stale": True} if stale else None
 
     cells = _build_grid_cells(boundary, cols, rows)
     if not cells:
         return None
 
+    semaphore = asyncio.Semaphore(4)
+
     async def sample(cell: dict[str, Any]) -> None:
         try:
-            series = await query_sentinel_hub_statistical(token, cell["boundary"])
+            async with semaphore:
+                series = await query_sentinel_hub_statistical(token, cell["boundary"])
         except Exception:
             series = None
         cell["ndvi"] = None
         cell["ndmi"] = None
-        if series and series.get("observations"):
-            last = series["observations"][-1]
-            cell["ndvi"] = last.get("ndviMean")
-            cell["ndmi"] = last.get("ndmiMean")
+        cell["observations"] = series.get("observations", []) if series else []
 
     await asyncio.gather(*(sample(cell) for cell in cells))
 
+    # Compare cells from the same interval; never mix summer and autumn values.
+    dates = sorted({o["date"] for c in cells for o in c["observations"]}, reverse=True)
+    observation_date = None
+    total_area = sum(c["areaHa"] for c in cells)
+    for date in dates:
+        covered = [c for c in cells if any(o["date"] == date and o.get("reliability") == "high" for o in c["observations"])]
+        if len(covered) >= 2 and sum(c["areaHa"] for c in covered) >= total_area * 0.6:
+            observation_date = date
+            break
+    for cell in cells:
+        last = next((o for o in cell.pop("observations") if o["date"] == observation_date and o.get("reliability") == "high"), None)
+        if last:
+            cell["ndvi"] = last["ndviMedian"] if last.get("ndviMedian") is not None else last["ndviMean"]
+            cell["ndmi"] = last.get("ndmiMean")
+            cell["periodEnd"] = last.get("periodEnd")
+
     valid = [c for c in cells if isinstance(c.get("ndvi"), (int, float))]
     if len(valid) < 2:
-        return None
-
-    mean_ndvi = round(sum(c["ndvi"] for c in valid) / len(valid), 3)
-    ndmi_vals = [c["ndmi"] for c in valid if isinstance(c.get("ndmi"), (int, float))]
-    mean_ndmi = round(sum(ndmi_vals) / len(ndmi_vals), 3) if ndmi_vals else None
+        stale = _disk_cache_read("grid", key, float("inf"))
+        return {**stale, "stale": True} if stale else None
+    covered_area = sum(c["areaHa"] for c in valid)
+    mean_ndvi = round(sum(c["ndvi"] * c["areaHa"] for c in valid) / covered_area, 3)
+    ndmi_cells = [c for c in valid if isinstance(c.get("ndmi"), (int, float))]
+    mean_ndmi = round(sum(c["ndmi"] * c["areaHa"] for c in ndmi_cells) / sum(c["areaHa"] for c in ndmi_cells), 3) if ndmi_cells else None
 
     result = {
+        "qualityVersion": 2,
+        "stale": False,
+        "observationDate": observation_date,
+        "periodEnd": valid[0].get("periodEnd"),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "coveragePercent": round(covered_area / total_area * 100, 1) if total_area else 0,
         "cells": valid,
         "cellsInField": len(cells),
         "meanNdvi": mean_ndvi,
@@ -816,4 +1036,5 @@ async def fetch_field_risk_grid(
         "gridSize": f"{cols}×{rows}",
     }
     _grid_cache[key] = (now, result)
+    _disk_cache_write("grid", key, result)
     return result

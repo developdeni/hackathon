@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
+import math
 
 from .auth import compute_area_ha
 
@@ -17,16 +18,25 @@ _DEFICIT_CRITICAL = 0.14
 
 def classify_land_use(observations: list[dict[str, Any]]) -> dict[str, Any]:
     """Классификация поля по сезонной амплитуде NDVI: активный оборот или залежь."""
-    valid = [
-        float(obs["ndviMean"])
-        for obs in observations
-        if isinstance(obs.get("ndviMean"), (int, float))
-    ]
-    if len(valid) < 2:
+    seasonal = []
+    for obs in observations:
+        try:
+            date = datetime.fromisoformat(obs["date"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        value = obs.get("ndviMean")
+        if 4 <= date.month <= 9 and obs.get("reliability") == "high" and isinstance(value, (int, float)) and math.isfinite(value):
+            seasonal.append((date, float(value)))
+    year = max((date.year for date, _ in seasonal), default=0)
+    seasonal = [(date, value) for date, value in seasonal if date.year == year]
+    months = {date.month for date, _ in seasonal}
+    valid = [value for _, value in seasonal]
+    enough = len(valid) >= 6 and any(m in months for m in (4, 5)) and {6, 7, 8}.issubset(months)
+    if not enough:
         return {
             "status": "unknown",
             "label": "Недостаточно снимков",
-            "description": "Для классификации нужны минимум два валидных наблюдения NDVI за сезон.",
+            "description": "Нужны минимум 6 качественных периодов одного сезона: весна и июнь–август. Двух снимков недостаточно для вывода об использовании земли.",
             "maxNdvi": None,
             "minNdvi": None,
             "amplitude": None,
@@ -38,12 +48,12 @@ def classify_land_use(observations: list[dict[str, Any]]) -> dict[str, Any]:
     amplitude = max_ndvi - min_ndvi
     if amplitude > 0.35:
         status = "active"
-        label = "В обороте"
-        description = "Сезонная амплитуда NDVI высокая: поле показывает выраженный цикл роста культуры."
+        label = "Вероятно в обороте"
+        description = "Сезонная динамика соответствует циклу роста. Это оценка по NDVI, а не подтверждение обработки земли."
     elif max_ndvi < 0.25:
         status = "fallow"
-        label = "Залежь / не используется"
-        description = "NDVI остаётся низким и плоским: признаков активной культуры за сезон не видно."
+        label = "Возможное неиспользование"
+        description = "Низкий NDVI в течение сезона. Возможны пар, засуха или отсутствие культуры; статус залежи подтверждается осмотром."
     else:
         status = "uncertain"
         label = "Требует проверки"
@@ -151,12 +161,12 @@ def build_risk_zones(
         ndmi_deficit = (
             round(mean_ndmi - cell["ndmi"], 3)
             if mean_ndmi is not None and isinstance(cell.get("ndmi"), (int, float))
-            else 0.0
+            else None
         )
         cell_area = round(compute_area_ha(cell["boundary"]), 1) or cell_area_ha
 
         # Основной фактор — по тому, что просело сильнее: влага (NDMI) или биомасса (NDVI).
-        if ndmi_deficit >= 0.05 and ndmi_deficit >= deficit * 0.6:
+        if ndmi_deficit is not None and ndmi_deficit >= 0.05 and ndmi_deficit >= deficit * 0.6:
             main_factor = "Дефицит влаги: NDMI ниже среднего по полю, вероятное пересыхание."
             recommendation = "Выезд для замера продуктивной влаги 0–30 см в этой части поля."
         else:
@@ -171,10 +181,10 @@ def build_risk_zones(
             "areaHa": cell_area,
             "percentOfField": round((cell_area / area_ha) * 100, 1) if area_ha else 0.0,
             "persistenceDays": 0,
-            "persistenceStatus": "По последнему обработанному снимку Sentinel-2.",
+            "persistenceStatus": "По одному периоду; устойчивость аномалии не подтверждена.",
             "ndviMean": round(cell["ndvi"], 2),
             "ndviDeficit": -abs(deficit),
-            "ndmiDeficit": -abs(ndmi_deficit),
+            "ndmiDeficit": -abs(ndmi_deficit) if ndmi_deficit is not None else None,
             "mainFactor": main_factor,
             "recommendation": recommendation,
             "centroid": cell["centroid"],
@@ -196,7 +206,7 @@ def build_risk_zones(
             "targetInspectionHa": total_suspect_ha,
             "savedInspectionHa": saved_ha,
             "reductionPercent": round((saved_ha / area_ha) * 100, 1) if area_ha else 0.0,
-            "estimatedSeasonSavingsKzt": int(saved_ha * 250),
+            "estimatedSeasonSavingsKzt": None,
         },
     } if zones else None
 
@@ -205,8 +215,13 @@ def build_risk_zones(
         "fieldName": field_name,
         "totalFieldAreaHa": area_ha,
         "status": "ready",
+        "qualityVersion": 2,
+        "stale": grid.get("stale", False),
+        "observationDate": grid.get("observationDate"),
+        "periodEnd": grid.get("periodEnd"),
+        "coveragePercent": grid.get("coveragePercent"),
         "message": None,
-        "analysisDate": datetime.now(timezone.utc).isoformat(),
+        "analysisDate": grid.get("updatedAt"),
         "satelliteMission": "Sentinel-2 MSI Level-2A (10 м)",
         "dataSource": f"Copernicus Sentinel-2 · сетка {grid.get('gridSize')}",
         "meanFieldNdvi": mean_ndvi,
