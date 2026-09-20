@@ -478,3 +478,23 @@ export type AiChatMessage = {
   diagnosis?: AiDiagnosisResult | null;
   photoUri?: string | null;
 };
+
+export type AiFieldBadge = {
+  label: string;
+  type: 'success' | 'warning' | 'info' | 'primary';
+  detail?: string;
+};
+
+export type AiFarmSummary = {
+  status: 'ready' | 'empty';
+  profileId: string;
+  farmName: string;
+  region?: string;
+  totalAreaHa: number;
+  fieldsCount: number;
+  cropsSummary: string;
+  summaryText: string;
+  quickQuestions: string[];
+  fieldBadges: Record<string, AiFieldBadge>;
+  generatedAt?: string;
+};

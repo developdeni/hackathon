@@ -25,6 +25,8 @@ import {
   YieldHistoryRecord,
   YieldHistorySource,
   ZonesData,
+  AiFarmSummary,
+  AiFieldBadge,
 } from '../types/domain';
 import { loadToken } from './auth';
 import {
@@ -179,7 +181,32 @@ export const CACHE_KEYS = {
   YIELD_FORECAST: (fieldId: string) => `yieldforecast_v1_${fieldId}`,
   YIELD_HISTORY: (fieldId: string) => `yieldhistory_v1_${fieldId}`,
   OPERATIONS: (fieldId: string) => `operations_v1_${fieldId}`,
+  AI_FARM_SUMMARY: (profileId: string) => `ai_farm_summary_v1_${profileId}`,
 };
+
+export async function getAiFarmSummary(profileId: string, refresh = false): Promise<AiFarmSummary> {
+  const cacheKey = CACHE_KEYS.AI_FARM_SUMMARY(profileId);
+  if (!refresh) {
+    const cached = await getLocalCache<AiFarmSummary>(cacheKey);
+    if (cached) {
+      // Return cached immediately and refresh in background
+      apiFetch<AiFarmSummary>(`/api/profiles/${encodeURIComponent(profileId)}/ai-summary`)
+        .then((fresh) => void saveLocalCache(cacheKey, fresh))
+        .catch(() => {});
+      return cached;
+    }
+  }
+  try {
+    const url = `/api/profiles/${encodeURIComponent(profileId)}/ai-summary${refresh ? '?refresh=true' : ''}`;
+    const data = await apiFetch<AiFarmSummary>(url);
+    void saveLocalCache(cacheKey, data);
+    return data;
+  } catch (err) {
+    const cached = await getLocalCache<AiFarmSummary>(cacheKey);
+    if (cached) return cached;
+    throw err;
+  }
+}
 
 export async function listProfiles(): Promise<FarmProfile[]> {
   try {

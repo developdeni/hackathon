@@ -5,7 +5,7 @@ import { Text } from './AppText';
 import { colors } from '../theme/colors';
 import { fontFamilies } from '../theme/typography';
 
-type BadgeVariant = 'demo' | 'success' | 'warning' | 'danger' | 'neutral' | 'primary' | 'muted';
+type BadgeVariant = 'demo' | 'success' | 'warning' | 'danger' | 'neutral' | 'primary' | 'muted' | 'info';
 
 type Props = {
   label: string;
@@ -67,5 +67,9 @@ const variantStyles: Record<BadgeVariant, { container: ViewStyle; text: TextStyl
   muted: {
     container: { backgroundColor: '#EAEAEA' },
     text: { color: colors.muted },
+  },
+  info: {
+    container: { backgroundColor: '#E3F2FD' },
+    text: { color: '#0D47A1' },
   },
 };

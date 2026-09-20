@@ -42,11 +42,12 @@ import {
   loadAiChatHistory,
   saveAiChatHistory,
   clearAiChatHistory,
+  getAiFarmSummary,
 } from '../src/services/api';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
-import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage } from '../src/types/domain';
+import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage, AiFarmSummary, AiFieldBadge } from '../src/types/domain';
 
 type TabKey = 'ai_tools' | 'fields' | 'profile';
 
@@ -102,6 +103,13 @@ export default function MainScreen() {
   const [activeTab, setActiveTab] = useState<TabKey>(params.tab ?? 'ai_tools');
   // AI Tools sub-screens (chat/photo) go full-screen — hide the bottom nav there.
   const [aiImmersive, setAiImmersive] = useState(false);
+  // Prompt forwarded from other tabs (e.g. farm summary quick questions)
+  const [externalAiPrompt, setExternalAiPrompt] = useState<string | null>(null);
+
+  const handleAskAi = useCallback((question: string) => {
+    setExternalAiPrompt(question);
+    setActiveTab('ai_tools');
+  }, []);
 
   // Instant hydration from fast memory cache (0ms perceived latency)
   const initialProfiles = getMemoryCache<FarmProfile[]>(CACHE_KEYS.PROFILES) ?? [];
@@ -264,6 +272,8 @@ export default function MainScreen() {
           <AiToolsView
             onNavigateToFields={() => setActiveTab('fields')}
             onImmersiveChange={setAiImmersive}
+            externalPrompt={externalAiPrompt}
+            onClearExternalPrompt={() => setExternalAiPrompt(null)}
           />
         </View>
 
@@ -287,6 +297,7 @@ export default function MainScreen() {
               }
             }}
             onOpenField={(fieldId) => router.push({ pathname: '/field/[id]', params: { id: fieldId } })}
+            onAskAi={handleAskAi}
           />
         )}
 
@@ -461,9 +472,13 @@ function getGrainRatingMeta(rating?: string): {
 function AiToolsView({
   onNavigateToFields,
   onImmersiveChange,
+  externalPrompt,
+  onClearExternalPrompt,
 }: {
   onNavigateToFields: () => void;
   onImmersiveChange: (immersive: boolean) => void;
+  externalPrompt?: string | null;
+  onClearExternalPrompt?: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const [viewMode, setViewMode] = useState<AiViewMode>('menu');
@@ -918,6 +933,17 @@ function AiToolsView({
       setIsAnswering(false);
     }
   };
+
+  useEffect(() => {
+    if (externalPrompt) {
+      setViewMode('chat');
+      const timer = setTimeout(() => {
+        void handleSendMessage(externalPrompt);
+        onClearExternalPrompt?.();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [externalPrompt, onClearExternalPrompt]);
 
   const handleClearHistory = () => {
     Alert.alert('Очистить историю', 'Удалить переписку с AI-агрономом?', [
@@ -1943,6 +1969,115 @@ function AiToolsView({
 
 
 /* =========================================================================
+   2.1. AI FARM DIGEST CARD (AI-Сводка хозяйства)
+   ========================================================================= */
+interface AiFarmDigestCardProps {
+  summary: AiFarmSummary | null;
+  loading: boolean;
+  onRefresh: () => void;
+  onAskQuestion: (q: string) => void;
+}
+
+function AiFarmDigestCard({
+  summary,
+  loading,
+  onRefresh,
+  onAskQuestion,
+}: AiFarmDigestCardProps) {
+  if (!summary && !loading) return null;
+
+  return (
+    <Card style={styles.aiDigestCard}>
+      {/* Top Header */}
+      <View style={styles.aiDigestHeader}>
+        <View style={styles.aiDigestHeaderLeft}>
+          <View style={styles.aiDigestIconWrap}>
+            <AppIcon name="sparkles" size={13} color="#1B5E20" />
+          </View>
+          <Text style={styles.aiDigestHeaderTitle}>AI-СВОДКА ХОЗЯЙСТВА</Text>
+        </View>
+        <Pressable
+          onPress={onRefresh}
+          disabled={loading}
+          hitSlop={8}
+          style={({ pressed }) => [styles.aiDigestRefreshBtn, pressed && styles.pressed]}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : (
+            <AppIcon name="arrow.clockwise" size={13} color={colors.textSecondary} />
+          )}
+        </Pressable>
+      </View>
+
+      {/* Main summary text & chips */}
+      <View style={styles.aiDigestBody}>
+        {loading && !summary ? (
+          <View style={styles.aiDigestLoadingBox}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.aiDigestLoadingText}>Анализ хозяйства AI-агрономом…</Text>
+          </View>
+        ) : summary ? (
+          <>
+            <Text style={styles.aiDigestText}>{summary.summaryText}</Text>
+            {summary.cropsSummary ? (
+              <View style={styles.aiDigestMetaRow}>
+                <AppIcon name="leaf" size={12} color="#2E7D32" />
+                <Text style={styles.aiDigestMetaText} numberOfLines={1}>
+                  Посевы: {summary.cropsSummary}
+                </Text>
+              </View>
+            ) : null}
+
+            {/* Quick questions chips */}
+            {summary.quickQuestions && summary.quickQuestions.length > 0 ? (
+              <View style={styles.aiDigestChipsSection}>
+                <Text style={styles.aiDigestChipsTitle}>БЫСТРЫЕ ВОПРОСЫ К ИИ:</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.aiDigestChipsRow}
+                >
+                  {summary.quickQuestions.map((question, idx) => (
+                    <Pressable
+                      key={idx}
+                      onPress={() => onAskQuestion(question)}
+                      style={({ pressed }) => [
+                        styles.aiDigestChip,
+                        pressed && styles.aiDigestChipPressed,
+                      ]}
+                    >
+                      <Text style={styles.aiDigestChipText}>{question}</Text>
+                      <AppIcon name="arrow.up.right" size={10} color="#1B5E20" />
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
+
+            {/* Bottom action button */}
+            <Pressable
+              onPress={() =>
+                onAskQuestion(
+                  `Составь детальный план обследования и фитосанитарный прогноз для хозяйства «${summary.farmName}» (${summary.cropsSummary}, общая площадь: ${summary.totalAreaHa} га).`
+                )
+              }
+              style={({ pressed }) => [
+                styles.aiDigestChatButton,
+                pressed && styles.aiDigestChatButtonPressed,
+              ]}
+            >
+              <Text style={styles.aiDigestChatButtonText}>Задать вопрос AI-агроному</Text>
+              <AppIcon name="chevron.right" size={12} color="#1B5E20" />
+            </Pressable>
+          </>
+        ) : null}
+      </View>
+    </Card>
+  );
+}
+
+/* =========================================================================
    2. FIELDS VIEW (Профили в самом верху, список участков)
    ========================================================================= */
 interface FieldsViewProps {
@@ -1960,6 +2095,7 @@ interface FieldsViewProps {
   onNewProfile: () => void;
   onNewField: () => void;
   onOpenField: (id: string) => void;
+  onAskAi?: (question: string) => void;
 }
 
 function FieldsView({
@@ -1977,7 +2113,36 @@ function FieldsView({
   onNewProfile,
   onNewField,
   onOpenField,
+  onAskAi,
 }: FieldsViewProps) {
+  const [aiSummary, setAiSummary] = useState<AiFarmSummary | null>(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+
+  const loadAiSummary = useCallback(async (refresh = false) => {
+    if (!selectedProfile) {
+      setAiSummary(null);
+      return;
+    }
+    setAiSummaryLoading(true);
+    try {
+      const summary = await getAiFarmSummary(selectedProfile.id, refresh);
+      setAiSummary(summary);
+    } catch {
+      // Keep cached summary on offline or error
+    } finally {
+      setAiSummaryLoading(false);
+    }
+  }, [selectedProfile?.id]);
+
+  useEffect(() => {
+    void loadAiSummary();
+  }, [loadAiSummary]);
+
+  const handleRefresh = useCallback(() => {
+    onRefresh();
+    void loadAiSummary(true);
+  }, [onRefresh, loadAiSummary]);
+
   return (
     <ScrollView
       contentContainerStyle={styles.scrollContent}
@@ -2039,6 +2204,16 @@ function FieldsView({
         <SummaryCell value={inspectionCount} label="осмотров" />
       </Card>
 
+      {/* AI-Сводка хозяйства (Option 1 & 4) */}
+      {selectedProfile && (
+        <AiFarmDigestCard
+          summary={aiSummary}
+          loading={aiSummaryLoading}
+          onRefresh={() => void loadAiSummary(true)}
+          onAskQuestion={(q) => onAskAi?.(q)}
+        />
+      )}
+
       {/* Кнопки действий */}
       <View style={styles.actionsRow}>
         <Pressable
@@ -2048,7 +2223,7 @@ function FieldsView({
         >
           <Text style={styles.primaryButtonText}>Добавить участок</Text>
         </Pressable>
-        <Pressable onPress={onRefresh} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
+        <Pressable onPress={handleRefresh} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
           <Text style={styles.secondaryButtonText}>Обновить</Text>
         </Pressable>
       </View>
@@ -2068,7 +2243,7 @@ function FieldsView({
         <Card style={styles.errorBox}>
           <Text style={styles.errorTitle}>Нет связи с локальным API</Text>
           <Text style={styles.errorDescription}>{error}</Text>
-          <Pressable onPress={onRefresh} style={styles.retryButton}>
+          <Pressable onPress={handleRefresh} style={styles.retryButton}>
             <Text style={styles.retryButtonText}>Повторить</Text>
           </Pressable>
         </Card>
@@ -2082,6 +2257,7 @@ function FieldsView({
           {fields.map((field, index) => {
             const cropAccent = getCropAccent(field.cropType);
             const cropCode = getCropCode(field.cropType);
+            const aiBadge = aiSummary?.fieldBadges?.[field.id];
             return (
               <View key={field.id}>
                 <Pressable
@@ -2104,9 +2280,18 @@ function FieldsView({
                     <Text style={styles.fieldMeta} numberOfLines={1}>
                       {field.cropType || 'Культура не задана'} • {field.areaHa.toFixed(1)} га
                     </Text>
-                    <Text style={styles.fieldMetaSmall} numberOfLines={1}>
-                      Осмотров: {field.inspectionCount}
-                    </Text>
+                    <View style={styles.fieldBottomMetaRow}>
+                      <Text style={styles.fieldMetaSmall} numberOfLines={1}>
+                        Осмотров: {field.inspectionCount}
+                      </Text>
+                      {aiBadge && (
+                        <Badge
+                          label={aiBadge.label}
+                          variant={aiBadge.type}
+                          style={styles.fieldAiBadge}
+                        />
+                      )}
+                    </View>
                   </View>
                   <AppIcon name="chevron.right" size={13} color="#C7C7CC" />
                 </Pressable>
@@ -2586,10 +2771,146 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.muted,
   },
+  fieldBottomMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 2,
+    gap: 6,
+  },
+  fieldAiBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
   rowDivider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.border,
     marginLeft: 60,
+  },
+
+  /* AI Farm Digest Card */
+  aiDigestCard: {
+    marginHorizontal: 0,
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#DDF0DD',
+    gap: 10,
+  },
+  aiDigestHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  aiDigestHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  aiDigestIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#E8F5E9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiDigestHeaderTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 11.5,
+    letterSpacing: 0.6,
+    color: '#1B5E20',
+  },
+  aiDigestRefreshBtn: {
+    padding: 4,
+  },
+  aiDigestBody: {
+    gap: 10,
+  },
+  aiDigestLoadingBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  aiDigestLoadingText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12.5,
+    color: colors.textSecondary,
+  },
+  aiDigestText: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.text,
+  },
+  aiDigestMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingTop: 2,
+  },
+  aiDigestMetaText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: '#2E7D32',
+    flex: 1,
+  },
+  aiDigestChipsSection: {
+    gap: 6,
+    marginTop: 2,
+  },
+  aiDigestChipsTitle: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 10,
+    letterSpacing: 0.4,
+    color: colors.textSecondary,
+  },
+  aiDigestChipsRow: {
+    gap: 8,
+    paddingRight: 6,
+  },
+  aiDigestChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    backgroundColor: '#F1F8F1',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#CDE5CD',
+  },
+  aiDigestChipPressed: {
+    backgroundColor: '#E1F0E1',
+  },
+  aiDigestChipText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11.5,
+    color: '#1B5E20',
+  },
+  aiDigestChatButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F7FAF7',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#E2EBE2',
+    marginTop: 2,
+  },
+  aiDigestChatButtonPressed: {
+    backgroundColor: '#EDF5ED',
+  },
+  aiDigestChatButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12,
+    color: '#1B5E20',
   },
 
   /* AI Tools Screen Styles */
