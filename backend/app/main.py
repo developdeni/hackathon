@@ -615,33 +615,57 @@ async def get_profile_ai_summary(
     field_badges: dict[str, dict[str, str]] = {}
     for f in fields:
         f_id = f["id"]
-        area = f["areaHa"]
-        h = sum(ord(ch) for ch in f_id)
-        variant = h % 4
-        if variant == 0 or area > 350:
+        boundary = f.get("boundary") or []
+        if boundary and isinstance(boundary, list):
+            c_lat = sum(p["latitude"] for p in boundary) / len(boundary)
+            c_lon = sum(p["longitude"] for p in boundary) / len(boundary)
+        else:
+            c_lat = 51.6500
+            c_lon = 71.3000
+
+        w_data = await get_field_agro_weather(c_lat, c_lon)
+        alerts = w_data.get("alerts") or []
+        frost_alert = next((a for a in alerts if a.get("type") == "frost"), None)
+
+        wind = w_data.get("current", {}).get("windSpeed")
+        water_bal = w_data.get("forecast7d", {}).get("waterBalance")
+        insp_count = f.get("inspectionCount") or 0
+
+        if frost_alert:
             field_badges[f_id] = {
-                "label": "AI: Оптимум вегетации",
+                "label": "Риск заморозков (метео)",
+                "type": "critical",
+                "detail": frost_alert.get("description") or "Минимум температуры по прогнозу около 0°C",
+            }
+        elif wind is not None and wind <= 4.0:
+            field_badges[f_id] = {
+                "label": f"Ветер {wind:.1f} м/с · Окно СЗР",
                 "type": "success",
-                "detail": "NDVI в пределах нормы, вегетационный индекс стабилен",
+                "detail": f"Штиль/слабый ветер {wind:.1f} м/с: условия для опрыскивания открыты",
             }
-        elif variant == 1:
-            risk_ha = round(max(1.2, min(area * 0.07, 14.0)), 1)
+        elif wind is not None and wind > 4.0:
             field_badges[f_id] = {
-                "label": f"AI: Очаг риска ~{risk_ha} га",
+                "label": f"Ветер {wind:.1f} м/с · Снос СЗР",
                 "type": "warning",
-                "detail": "Выявлено локальное снижение биомассы, рекомендован осмотр",
+                "detail": f"Ветер {wind:.1f} м/с превышает 4 м/с: риск ветрового сноса",
             }
-        elif variant == 2:
+        elif water_bal is not None and water_bal < -10.0:
             field_badges[f_id] = {
-                "label": "AI: Окно СЗР 2 дня",
-                "type": "info",
-                "detail": "Благоприятное окно для опрыскивания: ветер < 4 м/с",
+                "label": f"Дефицит влаги {abs(water_bal):.1f} мм",
+                "type": "warning",
+                "detail": "Отрицательный прогнозный водный баланс на 7 дней",
+            }
+        elif insp_count == 0:
+            field_badges[f_id] = {
+                "label": "0 осмотров · Нужен выезд",
+                "type": "neutral",
+                "detail": "На участке ещё не зарегистрировано полевых обследований",
             }
         else:
             field_badges[f_id] = {
-                "label": "AI: Рейтинг биомассы A+",
-                "type": "primary",
-                "detail": "Высокая динамика накопления зеленой фитомассы",
+                "label": f"Осмотров: {insp_count} · На контроле",
+                "type": "success",
+                "detail": f"Участок под регулярным наблюдением (проведено {insp_count} осмотров)",
             }
 
     prompt = (
@@ -1357,9 +1381,20 @@ async def ai_agronomic_chat(input_data: AiChatInput) -> dict:
     elif isinstance(input_data.farm_context, str) and input_data.farm_context.strip():
         farm_ctx = {"raw_text": input_data.farm_context.strip()}
 
-    # Resolve coordinates for Akmola territory
+    # Resolve coordinates for Akmola territory or specific target field
     lat: float | None = None
     lon: float | None = None
+
+    target_field = farm_ctx.get("targetField")
+    if isinstance(target_field, dict):
+        tf_coords = target_field.get("coordinates")
+        if isinstance(tf_coords, dict):
+            try:
+                if tf_coords.get("latitude") is not None and tf_coords.get("longitude") is not None:
+                    lat = float(tf_coords["latitude"])
+                    lon = float(tf_coords["longitude"])
+            except (ValueError, TypeError):
+                pass
 
     coords = farm_ctx.get("coordinates")
     if isinstance(coords, dict):

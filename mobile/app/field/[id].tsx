@@ -532,6 +532,18 @@ export default function FieldScreen() {
     }
   }
 
+  const askAiAboutField = useCallback((cleanQuestion?: string) => {
+    if (!field) return;
+    router.replace({
+      pathname: '/',
+      params: {
+        tab: 'ai_tools',
+        fieldId: field.id,
+        aiPrompt: cleanQuestion || '',
+      },
+    });
+  }, [field, router]);
+
   const ndviStatusColor = zonesData?.meanFieldNdvi != null
     ? (zonesData.meanFieldNdvi > 0.5 ? colors.success : colors.warning)
     : colors.text;
@@ -558,7 +570,6 @@ export default function FieldScreen() {
             <Text style={styles.fieldName} numberOfLines={2}>{field.name}</Text>
             <Text style={styles.fieldCrop} numberOfLines={1}>{field.cropType}</Text>
           </View>
-          {field.isDemo && <Badge label="Демо" variant="muted" style={{ flexShrink: 0 }} />}
         </View>
 
         <View style={styles.hairline} />
@@ -574,6 +585,55 @@ export default function FieldScreen() {
           <View style={styles.vertDiv} />
           <MetricCell value={String(inspections.length)} unit="" label="Осмотров" />
         </View>
+      </Card>
+
+      {/* ── AI КОНСУЛЬТАНТ ПО УЧАСТКУ ─────────────────────────── */}
+      <Card style={styles.aiConsultantCard}>
+        <View style={styles.aiConsultantHeader}>
+          <View style={styles.aiConsultantBadge}>
+            <Text style={styles.aiConsultantBadgeText}>✨ AI-Консультант</Text>
+          </View>
+          <Text style={styles.aiConsultantTitle}>
+            Анализ участка «{field.name}»
+          </Text>
+          <Text style={styles.aiConsultantDesc}>
+            Персональный расчёт погоды, баланса влаги и фитосанитарных рисков по координатам поля в Акмолинской области.
+          </Text>
+        </View>
+
+        <View style={styles.aiQuickChipsWrap}>
+          <Pressable
+            style={({ pressed }) => [styles.aiQuickChip, pressed && styles.aiQuickChipPressed]}
+            onPress={() => askAiAboutField(`Какой фитосанитарный прогноз и рекомендации по культуре ${field.cropType || 'растения'} на поле «${field.name}» (${field.areaHa.toFixed(1)} га)?`)}
+          >
+            <Text style={styles.aiQuickChipText}>🌾 Прогноз и созревание</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.aiQuickChip, pressed && styles.aiQuickChipPressed]}
+            onPress={() => askAiAboutField(`Оценить водный баланс, испаряемость и окно внесения СЗР для поля «${field.name}» на 7 дней.`)}
+          >
+            <Text style={styles.aiQuickChipText}>💧 Влага и окно СЗР</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.aiQuickChip, pressed && styles.aiQuickChipPressed]}
+            onPress={() => askAiAboutField(`Какая схема защиты от сорняков, болезней и вредителей рекомендуется для поля «${field.name}» (${field.cropType})?`)}
+          >
+            <Text style={styles.aiQuickChipText}>🛡️ Схема защиты</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.aiQuickChip, pressed && styles.aiQuickChipPressed]}
+            onPress={() => askAiAboutField(`Составь детальный план обследования и чек-лист для полевого осмотра участка «${field.name}» (${field.cropType}, ${field.areaHa.toFixed(1)} га).`)}
+          >
+            <Text style={styles.aiQuickChipText}>📋 План осмотра</Text>
+          </Pressable>
+        </View>
+
+        <Pressable
+          style={({ pressed }) => [styles.aiOpenChatBtn, pressed && styles.aiOpenChatBtnPressed]}
+          onPress={() => askAiAboutField()}
+        >
+          <Text style={styles.aiOpenChatBtnText}>Задать свой вопрос в AI-чате →</Text>
+        </Pressable>
       </Card>
 
       {classification && (
@@ -1327,6 +1387,77 @@ const styles = StyleSheet.create({
   fieldName: { fontFamily: fontFamilies.bold, fontSize: 17, color: colors.text },
   fieldCrop: { fontFamily: fontFamilies.regular, fontSize: 13, color: colors.textSecondary },
   metricsRow: { flexDirection: 'row', alignItems: 'center' },
+
+  // AI Consultant card
+  aiConsultantCard: {
+    padding: 14,
+    gap: 10,
+    backgroundColor: '#F7FCF9',
+    borderColor: '#CDEBD9',
+    borderWidth: 1,
+  },
+  aiConsultantHeader: {
+    gap: 4,
+  },
+  aiConsultantBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: '#E2F6EB',
+    marginBottom: 2,
+  },
+  aiConsultantBadgeText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 11,
+    color: '#0D7D4D',
+  },
+  aiConsultantTitle: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 15,
+    color: colors.text,
+  },
+  aiConsultantDesc: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    lineHeight: 17,
+    color: colors.textSecondary,
+  },
+  aiQuickChipsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 4,
+  },
+  aiQuickChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#BFE7CF',
+  },
+  aiQuickChipPressed: {
+    backgroundColor: '#E8F7EE',
+  },
+  aiQuickChipText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: '#165B37',
+  },
+  aiOpenChatBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    paddingVertical: 4,
+  },
+  aiOpenChatBtnPressed: {
+    opacity: 0.6,
+  },
+  aiOpenChatBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: '#0D7D4D',
+  },
 
   // Classification card
   classCard: { padding: 0, gap: 0 },

@@ -1408,6 +1408,29 @@ def format_hidden_farm_context(farm_context: Any) -> str:
             insp_str = f" | осмотров: {insp}" if insp is not None else ""
             lines.append(f"  • {name}: {crop}, {area} га{c_str}{badge_str}{insp_str}")
 
+    target_field = farm_context.get("targetField")
+    if target_field and isinstance(target_field, dict):
+        lines.append("- ЦЕЛЕВОЙ УЧАСТОК ДЛЯ ИНДИВИДУАЛЬНОГО АНАЛИЗА (ФОКУС ВОПРОСА):")
+        tf_name = target_field.get("name") or "Участок"
+        tf_crop = target_field.get("cropType") or "Культура не указана"
+        tf_area = target_field.get("areaHa")
+        lines.append(f"  • Название поля: «{tf_name}»")
+        lines.append(f"  • Возделываемая культура: {tf_crop}")
+        if tf_area:
+            lines.append(f"  • Площадь участка: {tf_area} га")
+        if target_field.get("perimeterKm"):
+            lines.append(f"  • Периметр контура: {target_field['perimeterKm']} км")
+        tf_coords = target_field.get("coordinates")
+        if tf_coords and isinstance(tf_coords, dict):
+            c_lat = tf_coords.get("latitude")
+            c_lon = tf_coords.get("longitude")
+            if c_lat is not None and c_lon is not None:
+                lines.append(f"  • Центроид GPS поля: {float(c_lat):.4f}°N, {float(c_lon):.4f}°E")
+        if target_field.get("inspectionCount") is not None:
+            lines.append(f"  • Число полевых осмотров: {target_field['inspectionCount']}")
+        if target_field.get("badge") or target_field.get("status"):
+            lines.append(f"  • Оперативный статус: {target_field.get('badge') or target_field.get('status')}")
+
     weather = farm_context.get("weather")
     if weather and isinstance(weather, dict):
         lines.append("- Оперативный метеопрогноз Open-Meteo по координатам территории (Акмолинская область):")

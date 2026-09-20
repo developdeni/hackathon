@@ -75,9 +75,23 @@ export interface FarmContextData {
       longitude: number;
     };
   }>;
+  targetField?: {
+    id: string;
+    name: string;
+    cropType: string;
+    areaHa: number;
+    perimeterKm?: number;
+    inspectionCount?: number;
+    badge?: string;
+    coordinates?: {
+      latitude: number;
+      longitude: number;
+    };
+  };
   diagnosis?: any;
   weather?: any;
 }
+
 
 
 /* Typing dots animation component */
@@ -126,7 +140,12 @@ export default function MainScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { user, logout, refreshUser, isLoading: isAuthLoading } = useAuth();
-  const params = useLocalSearchParams<{ profileId?: string; tab?: TabKey }>();
+  const params = useLocalSearchParams<{
+    profileId?: string;
+    tab?: TabKey;
+    aiPrompt?: string;
+    fieldId?: string;
+  }>();
 
   // AI Tools opens by default as requested
   const [activeTab, setActiveTab] = useState<TabKey>(params.tab ?? 'ai_tools');
@@ -134,6 +153,7 @@ export default function MainScreen() {
   const [aiImmersive, setAiImmersive] = useState(false);
   // Prompt forwarded from other tabs (e.g. farm summary quick questions)
   const [externalAiPrompt, setExternalAiPrompt] = useState<string | null>(null);
+  const [selectedFieldForAi, setSelectedFieldForAi] = useState<Field | null>(null);
 
   // Instant hydration from fast memory cache (0ms perceived latency)
   const initialProfiles = getMemoryCache<FarmProfile[]>(CACHE_KEYS.PROFILES) ?? [];
@@ -164,7 +184,16 @@ export default function MainScreen() {
     if (params.tab) {
       setActiveTab(params.tab);
     }
-  }, [params.tab]);
+    if (params.aiPrompt) {
+      setExternalAiPrompt(params.aiPrompt);
+      setActiveTab('ai_tools');
+    }
+    if (params.fieldId && fields.length > 0) {
+      const found = fields.find((f) => f.id === params.fieldId);
+      if (found) setSelectedFieldForAi(found);
+    }
+  }, [params.tab, params.aiPrompt, params.fieldId, fields]);
+
 
   const load = useCallback(async () => {
     // 1. If memory was empty on cold start, hydrate from disk immediately
@@ -288,6 +317,28 @@ export default function MainScreen() {
           }
         : { latitude: 51.6500, longitude: 71.3000 };
 
+    let targetFieldData: any = undefined;
+    if (selectedFieldForAi) {
+      let tfCenter: { latitude: number; longitude: number } | undefined;
+      if (selectedFieldForAi.boundary && selectedFieldForAi.boundary.length > 0) {
+        const sumLat = selectedFieldForAi.boundary.reduce((s, p) => s + p.latitude, 0);
+        const sumLon = selectedFieldForAi.boundary.reduce((s, p) => s + p.longitude, 0);
+        tfCenter = {
+          latitude: Number((sumLat / selectedFieldForAi.boundary.length).toFixed(4)),
+          longitude: Number((sumLon / selectedFieldForAi.boundary.length).toFixed(4)),
+        };
+      }
+      targetFieldData = {
+        id: selectedFieldForAi.id,
+        name: selectedFieldForAi.name,
+        cropType: selectedFieldForAi.cropType,
+        areaHa: selectedFieldForAi.areaHa,
+        perimeterKm: selectedFieldForAi.perimeterKm,
+        inspectionCount: selectedFieldForAi.inspectionCount,
+        coordinates: tfCenter,
+      };
+    }
+
     return {
       farmName: selectedProfile?.name || 'Хозяйство',
       region: 'Акмолинская область',
@@ -297,8 +348,9 @@ export default function MainScreen() {
       inspectionCount,
       cropsSummary,
       fields: fieldsData,
+      targetField: targetFieldData,
     };
-  }, [selectedProfile, fields, totalArea, inspectionCount]);
+  }, [selectedProfile, fields, totalArea, inspectionCount, selectedFieldForAi]);
 
   const handleAskAi = useCallback(
     (question: string) => {
@@ -306,6 +358,64 @@ export default function MainScreen() {
       setActiveTab('ai_tools');
     },
     []
+  );
+
+  const handleAskFieldQuestion = useCallback(
+    (field: Field, question: string) => {
+      setSelectedFieldForAi(field);
+      setExternalAiPrompt(question.trim());
+      setActiveTab('ai_tools');
+    },
+    []
+  );
+
+  const handleAskFieldAi = useCallback(
+    (field: Field) => {
+      Alert.alert(
+        `AI-Агроном · Поле «${field.name}»`,
+        `Культура: ${field.cropType || 'не указана'} (${field.areaHa.toFixed(1)} га)\nВыберите вопрос для индивидуального анализа:`,
+        [
+          {
+            text: '🌾 Прогноз и агро-рекомендации',
+            onPress: () => {
+              handleAskFieldQuestion(
+                field,
+                `Какой фитосанитарный прогноз и рекомендации по культуре ${field.cropType || 'растения'} на поле «${field.name}» (${field.areaHa.toFixed(1)} га)?`
+              );
+            },
+          },
+          {
+            text: '💧 Баланс влаги и риски погоды',
+            onPress: () => {
+              handleAskFieldQuestion(
+                field,
+                `Оценить водный баланс, испаряемость и риски погоды для поля «${field.name}» (${field.cropType || 'растения'}) на ближайшие 7 дней.`
+              );
+            },
+          },
+          {
+            text: '🛡️ Схема защиты от вредителей/болезней',
+            onPress: () => {
+              handleAskFieldQuestion(
+                field,
+                `Какая схема защиты от вредителей, сорняков и болезней рекомендуется для поля «${field.name}» (${field.cropType}) в Акмолинской области?`
+              );
+            },
+          },
+          {
+            text: '🔍 План фитосанитарного осмотра',
+            onPress: () => {
+              handleAskFieldQuestion(
+                field,
+                `Составь детальный план обследования и чек-лист для полевого осмотра участка «${field.name}» (${field.cropType}, ${field.areaHa.toFixed(1)} га).`
+              );
+            },
+          },
+          { text: 'Отмена', style: 'cancel' },
+        ]
+      );
+    },
+    [handleAskFieldQuestion]
   );
 
   async function chooseProfile(profileId: string) {
@@ -371,6 +481,8 @@ export default function MainScreen() {
             externalPrompt={externalAiPrompt}
             onClearExternalPrompt={() => setExternalAiPrompt(null)}
             farmContext={farmContext}
+            targetField={selectedFieldForAi}
+            onClearTargetField={() => setSelectedFieldForAi(null)}
           />
         </View>
 
@@ -395,6 +507,7 @@ export default function MainScreen() {
             }}
             onOpenField={(fieldId) => router.push({ pathname: '/field/[id]', params: { id: fieldId } })}
             onAskAi={handleAskAi}
+            onAskFieldAi={handleAskFieldAi}
           />
         )}
 
@@ -572,12 +685,16 @@ function AiToolsView({
   externalPrompt,
   onClearExternalPrompt,
   farmContext,
+  targetField,
+  onClearTargetField,
 }: {
   onNavigateToFields: () => void;
   onImmersiveChange: (immersive: boolean) => void;
   externalPrompt?: string | null;
   onClearExternalPrompt?: () => void;
   farmContext?: FarmContextData | null;
+  targetField?: Field | null;
+  onClearTargetField?: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const [viewMode, setViewMode] = useState<AiViewMode>('menu');
@@ -1082,13 +1199,47 @@ function AiToolsView({
     ]);
   };
 
-  const quickQuestions = [
-    '🌾 Норма высева пшеницы',
-    '🦠 Жёлтая ржавчина',
-    '🌿 Гербициды No-Till',
-    '🧪 Септориоз листьев',
-    '🌽 Сроки сева Акмолинская',
-  ];
+  const quickQuestions = targetField
+    ? [
+        `🌾 Прогноз для «${targetField.name}»`,
+        `💧 Баланс влаги и погода`,
+        `🛡️ Защита ${targetField.cropType || 'культуры'}`,
+        `🔍 План осмотра участка`,
+      ]
+    : [
+        '🌾 Норма высева пшеницы',
+        '🦠 Жёлтая ржавчина',
+        '🌿 Гербициды No-Till',
+        '🧪 Септориоз листьев',
+        '🌽 Сроки сева Акмолинская',
+      ];
+
+  const handleQuickChipPress = (chipText: string) => {
+    if (targetField) {
+      if (chipText.includes('Прогноз')) {
+        handleSendMessage(
+          `Какой фитосанитарный прогноз и рекомендации по культуре ${targetField.cropType || 'растения'} на поле «${targetField.name}» (${targetField.areaHa.toFixed(1)} га)?`
+        );
+      } else if (chipText.includes('Баланс влаги')) {
+        handleSendMessage(
+          `Оценить водный баланс, испаряемость и риски погоды для поля «${targetField.name}» на ближайшие 7 дней.`
+        );
+      } else if (chipText.includes('Защита')) {
+        handleSendMessage(
+          `Какая схема защиты от вредителей, сорняков и болезней рекомендуется для поля «${targetField.name}» (${targetField.cropType}) в Акмолинской области?`
+        );
+      } else if (chipText.includes('осмотра')) {
+        handleSendMessage(
+          `Составь детальный план обследования и чек-лист для полевого осмотра участка «${targetField.name}» (${targetField.cropType}, ${targetField.areaHa.toFixed(1)} га).`
+        );
+      } else {
+        handleSendMessage(chipText);
+      }
+    } else {
+      handleSendMessage(chipText);
+    }
+  };
+
 
   // ── Chat Message Renderer ──
   const renderMessage = useCallback(({ item: msg }: { item: AiChatMessage }) => {
@@ -1990,6 +2141,23 @@ function AiToolsView({
         )}
       </View>
 
+      {/* Target field indicator banner */}
+      {targetField && (
+        <View style={styles.targetFieldBanner}>
+          <View style={styles.targetFieldBannerLeft}>
+            <Text style={{ fontSize: 13 }}>📍</Text>
+            <Text style={styles.targetFieldBannerText} numberOfLines={1}>
+              Вопрос по участку: <Text style={styles.targetFieldBannerBold}>«{targetField.name}»</Text> ({targetField.cropType || 'не указана'}, {targetField.areaHa.toFixed(1)} га)
+            </Text>
+          </View>
+          {onClearTargetField && (
+            <Pressable onPress={onClearTargetField} hitSlop={8} style={styles.targetFieldClearBtn}>
+              <Text style={styles.targetFieldClearText}>Все поля ✕</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
       {/* Quick Chips (only show when few messages) */}
       {messages.length <= 2 && (
         <ScrollView
@@ -2002,7 +2170,7 @@ function AiToolsView({
             <Pressable
               key={idx}
               style={({ pressed }) => [styles.aiChip, pressed && styles.aiChipPressed]}
-              onPress={() => handleSendMessage(q)}
+              onPress={() => handleQuickChipPress(q)}
               disabled={isAnswering}
             >
               <Text style={styles.aiChipText}>{q}</Text>
@@ -2210,6 +2378,7 @@ interface FieldsViewProps {
   onNewField: () => void;
   onOpenField: (id: string) => void;
   onAskAi?: (question: string) => void;
+  onAskFieldAi?: (field: Field) => void;
 }
 
 function FieldsView({
@@ -2228,6 +2397,7 @@ function FieldsView({
   onNewField,
   onOpenField,
   onAskAi,
+  onAskFieldAi,
 }: FieldsViewProps) {
   const [aiSummary, setAiSummary] = useState<AiFarmSummary | null>(null);
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
@@ -2372,8 +2542,16 @@ function FieldsView({
             const cropAccent = getCropAccent(field.cropType);
             const cropCode = getCropCode(field.cropType);
             const aiBadge = aiSummary?.fieldBadges?.[field.id];
+
+            let centerCoords: string | null = null;
+            if (field.boundary && field.boundary.length > 0) {
+              const cLat = field.boundary.reduce((s, p) => s + p.latitude, 0) / field.boundary.length;
+              const cLon = field.boundary.reduce((s, p) => s + p.longitude, 0) / field.boundary.length;
+              centerCoords = `${cLat.toFixed(3)}°N, ${cLon.toFixed(3)}°E`;
+            }
+
             return (
-              <View key={field.id}>
+              <View key={field.id} style={styles.fieldItemContainer}>
                 <Pressable
                   onPress={() => onOpenField(field.id)}
                   onLongPress={() => onDeleteField(field)}
@@ -2389,11 +2567,15 @@ function FieldsView({
                       <Text style={styles.fieldName} numberOfLines={1}>
                         {field.name}
                       </Text>
-                      {field.isDemo && <Badge label="стартовое" variant="neutral" />}
                     </View>
                     <Text style={styles.fieldMeta} numberOfLines={1}>
-                      {field.cropType || 'Культура не задана'} • {field.areaHa.toFixed(1)} га
+                      {field.cropType || 'Культура не задана'} • {field.areaHa.toFixed(1)} га{field.perimeterKm ? ` • P: ${field.perimeterKm.toFixed(1)} км` : ''}
                     </Text>
+                    {centerCoords && (
+                      <Text style={styles.fieldGeoMeta} numberOfLines={1}>
+                        GPS: {centerCoords}
+                      </Text>
+                    )}
                     <View style={styles.fieldBottomMetaRow}>
                       <Text style={styles.fieldMetaSmall} numberOfLines={1}>
                         Осмотров: {field.inspectionCount}
@@ -2409,6 +2591,17 @@ function FieldsView({
                   </View>
                   <AppIcon name="chevron.right" size={13} color="#C7C7CC" />
                 </Pressable>
+
+                <View style={styles.fieldCardActionsRow}>
+                  <Pressable
+                    onPress={() => onAskFieldAi?.(field)}
+                    style={({ pressed }) => [styles.fieldAskAiBtn, pressed && styles.fieldAskAiBtnPressed]}
+                  >
+                    <AppIcon name="sparkles" size={12} color="#0D7D4D" />
+                    <Text style={styles.fieldAskAiBtnText}>Спросить AI по этому участку</Text>
+                  </Pressable>
+                </View>
+
                 {index < fields.length - 1 && <View style={styles.rowDivider} />}
               </View>
             );
@@ -2896,6 +3089,42 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 6,
+  },
+  fieldItemContainer: {
+    paddingVertical: 2,
+  },
+  fieldGeoMeta: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 11,
+    color: colors.muted,
+    marginTop: 1,
+  },
+  fieldCardActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+    paddingTop: 4,
+  },
+  fieldAskAiBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 4.5,
+    borderRadius: 7,
+    backgroundColor: '#F0F9F4',
+    borderWidth: 1,
+    borderColor: '#C3E6D2',
+  },
+  fieldAskAiBtnPressed: {
+    backgroundColor: '#D7F0E2',
+  },
+  fieldAskAiBtnText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 11.5,
+    color: '#0D7D4D',
   },
   rowDivider: {
     height: StyleSheet.hairlineWidth,
@@ -3629,6 +3858,48 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  /* Target field banner */
+  targetFieldBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#EDF7F1',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CBE7D7',
+  },
+  targetFieldBannerLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginRight: 8,
+  },
+  targetFieldBannerText: {
+    flex: 1,
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: '#165B37',
+  },
+  targetFieldBannerBold: {
+    fontFamily: fontFamilies.bold,
+    color: '#0E482A',
+  },
+  targetFieldClearBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#B3DFC6',
+  },
+  targetFieldClearText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: '#165B37',
   },
 
   /* Quick chips */
