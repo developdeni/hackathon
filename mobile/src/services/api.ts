@@ -40,7 +40,7 @@ import {
   saveLocalCache,
 } from './offline';
 
-export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://MacBook-Air-deni.local:8000';
+export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'https://lamps-sat-increases-pencil.trycloudflare.com';
 
 export class ApiRequestError extends Error {
   status: number;
