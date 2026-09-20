@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Tanap AI — Telegram Mini App</title>
+  
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Google Fonts: Montserrat -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ================================================================= -->
+  <!-- 1. CINEMATIC BROLD DEV INTRO SPLASH                               -->
+  <!-- ================================================================= -->
+  <div id="intro-splash" class="intro-splash">
+    <div class="splash-content">
+      <div class="glow-aura"></div>
+      <div class="bear-mascot-container">
+        <img src="assets/brold_bear_logo.png" alt="Brold Dev Bear" class="bear-mascot">
+      </div>
+      <div class="brand-title-wrap">
+        <h1 class="brand-title">BROLD <span class="brand-dev">DEV</span></h1>
+        <div class="brand-glow-bar"></div>
+      </div>
+      <div class="ceo-badge">
+        <span class="ceo-prefix">ceo.</span>
+        <span class="ceo-name">Данил Мирошниченко</span>
+      </div>
+    </div>
+    <div class="splash-tap-hint">Нажмите, чтобы пропустить</div>
+  </div>
+
+  <!-- ================================================================= -->
+  <!-- 2. TELEGRAM ONBOARDING / FAST AUTH MODAL                          -->
+  <!-- ================================================================= -->
+  <div id="auth-modal" class="auth-modal hidden">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-icon-badge">🌾</div>
+        <h2>Добро пожаловать в Tanap AI</h2>
+        <p>Спутниковый мониторинг полей и цифровой AI-агроном Казахстана</p>
+      </div>
+
+      <form id="auth-form" class="auth-form">
+        <div class="input-group">
+          <label for="input-name">Ваше имя / ФИО</label>
+          <div class="input-wrap">
+            <span class="input-icon">👤</span>
+            <input type="text" id="input-name" placeholder="Данил Мирошниченко" required autocomplete="name">
+          </div>
+        </div>
+
+        <div class="input-group">
+          <label for="input-company">Название хозяйства / КХ / ТОО</label>
+          <div class="input-wrap">
+            <span class="input-icon">🚜</span>
+            <input type="text" id="input-company" placeholder="КХ «Береке Агро»" required autocomplete="organization">
+          </div>
+        </div>
+
+        <button type="submit" id="btn-submit-auth" class="btn-primary">
+          <span>Войти в систему</span>
+          <span class="btn-arrow">→</span>
+        </button>
+      </form>
+      <div class="auth-footer-note">Вход в 1 клик через Telegram WebApp</div>
+    </div>
+  </div>
+
+  <!-- ================================================================= -->
+  <!-- 3. MAIN APPLICATION CONTAINER                                     -->
+  <!-- ================================================================= -->
+  <div id="app-container" class="app-container hidden">
+
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="header-logo-icon">🌾</div>
+        <div class="header-title-box">
+          <div class="header-app-name">TANAP <span class="accent-text">AI</span></div>
+          <div class="header-company-name" id="display-company-header">КХ Партнёр</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="online-pill">
+          <span class="pulse-dot"></span>
+          <span>Sentinel-2</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Scrollable Content Area -->
+    <main class="main-content">
+
+      <!-- TAB 1: УЧАСТКИ / ПОЛЯ -->
+      <section id="tab-fields" class="tab-pane active">
+        <!-- Farm Summary Metric Cards -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Площадь</div>
+            <div class="stat-value" id="stat-total-ha">480 <span class="stat-unit">га</span></div>
+            <div class="stat-sub">в обороте</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Участки</div>
+            <div class="stat-value" id="stat-field-count">2 <span class="stat-unit">поля</span></div>
+            <div class="stat-sub">Акмолинская обл.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Спутник</div>
+            <div class="stat-value text-emerald" id="stat-satellite-status">100%</div>
+            <div class="stat-sub">Sentinel L2A</div>
+          </div>
+        </div>
+
+        <!-- Section Title & Filter -->
+        <div class="section-header">
+          <h3 class="section-title">Земельные участки</h3>
+          <span class="badge-count" id="badge-field-count">2 поля</span>
+        </div>
+
+        <!-- Fields List -->
+        <div id="fields-list" class="fields-list">
+          <!-- Dynamic Field Cards Injected Here -->
+        </div>
+      </section>
+
+      <!-- TAB 2: AI АГРОНОМ -->
+      <section id="tab-advisor" class="tab-pane">
+        <div class="ai-banner">
+          <div class="ai-banner-icon">🤖</div>
+          <div class="ai-banner-content">
+            <div class="ai-banner-title">AI-Агроном Google Gemini</div>
+            <div class="ai-banner-sub">Экспертные ответы по нормам высева, защите растений и севообороту</div>
+          </div>
+        </div>
+
+        <!-- Quick Prompt Chips -->
+        <div class="quick-chips-scroll">
+          <button class="chip-btn" data-prompt="Нормы высева яровой пшеницы для Акмолинской области">🌾 Нормы высева пшеницы</button>
+          <button class="chip-btn" data-prompt="Какую баковую смесь составить против ржавчины и сорняков?">🧪 Баковые смеси</button>
+          <button class="chip-btn" data-prompt="Как подготовить почву по No-Till технологии перед посевом?">🚜 No-Till технология</button>
+          <button class="chip-btn" data-prompt="Когда оптимально начинать сев ячменя при температуре почвы +6°C?">🌱 Сроки сева ячменя</button>
+        </div>
+
+        <!-- Chat Conversation Messages Area -->
+        <div id="chat-thread" class="chat-thread">
+          <div class="chat-msg ai-msg">
+            <div class="msg-avatar">🌾</div>
+            <div class="msg-bubble">
+              Здравствуйте! Я ваш цифровой AI-агроном Tanap AI. Задайте вопрос по культурам, нормам удобрений, болезням или выберите подсказку выше.
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Input Bar -->
+        <div class="chat-input-bar">
+          <input type="text" id="chat-input" placeholder="Спросите агронома..." autocomplete="off">
+          <button id="btn-send-chat" class="btn-send" aria-label="Отправить">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+            </svg>
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB 3: ПРОФИЛЬ -->
+      <section id="tab-profile" class="tab-pane">
+        <div class="profile-card">
+          <div class="profile-avatar-box">
+            <div class="profile-avatar" id="profile-avatar-char">Д</div>
+          </div>
+          <div class="profile-info">
+            <h3 id="profile-user-name" class="profile-name">Данил Мирошниченко</h3>
+            <p id="profile-user-org" class="profile-org">КХ «Партнёр»</p>
+            <div class="profile-tg-badge" id="profile-tg-id">Telegram: @user</div>
+          </div>
+        </div>
+
+        <div class="menu-group">
+          <div class="menu-item">
+            <div class="menu-icon">📍</div>
+            <div class="menu-text">
+              <div class="menu-title">Регион возделывания</div>
+              <div class="menu-sub">Акмолинская область, Казахстан</div>
+            </div>
+          </div>
+          <div class="menu-item">
+            <div class="menu-icon">🛡️</div>
+            <div class="menu-text">
+              <div class="menu-title">Проверка добросовестности</div>
+              <div class="menu-sub">Ст. 92 Земельного кодекса РК (АКК)</div>
+            </div>
+            <div class="status-chip success">Соответствует</div>
+          </div>
+          <div class="menu-item">
+            <div class="menu-icon">☁️</div>
+            <div class="menu-text">
+              <div class="menu-title">Сервер и хранилище данных</div>
+              <div class="menu-sub">Oracle Cloud VPS (147.224.218.28)</div>
+            </div>
+            <div class="status-chip active">24/7 Онлайн</div>
+          </div>
+        </div>
+
+        <div class="profile-actions">
+          <button id="btn-logout" class="btn-secondary-outline">Сменить профиль / Выйти</button>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Bottom Navigation Bar (Glassmorphism) -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" data-tab="tab-fields">
+        <div class="nav-icon">🌾</div>
+        <span class="nav-label">Участки</span>
+      </button>
+      <button class="nav-item" data-tab="tab-advisor">
+        <div class="nav-icon">🤖</div>
+        <span class="nav-label">AI Агроном</span>
+      </button>
+      <button class="nav-item" data-tab="tab-profile">
+        <div class="nav-icon">👤</div>
+        <span class="nav-label">Профиль</span>
+      </button>
+    </nav>
+
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -80,6 +80,13 @@ class LoginInput(BaseModel):
     password: str
 
 
+class TelegramAuthInput(BaseModel):
+    telegramId: int | str
+    name: str = PydanticField(min_length=1, max_length=120)
+    companyName: str = PydanticField(min_length=1, max_length=120)
+    username: str | None = None
+
+
 class CreateProfileInput(BaseModel):
     name: str = PydanticField(min_length=2, max_length=80)
     region: str = PydanticField(default="", max_length=120)
@@ -347,6 +354,16 @@ app.add_middleware(
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
+TMA_DIR = Path(__file__).resolve().parent / "static" / "tma"
+TMA_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/tma", StaticFiles(directory=TMA_DIR, html=True), name="tma")
+
+
+@app.get("/")
+def root_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/tma/")
+
 
 # ---------------------------------------------------------------------------
 # Health
@@ -434,6 +451,97 @@ def login(payload: LoginInput) -> dict:
 
     token = create_access_token(row["id"])
     return {"token": token, "user": user_from_row(row)}
+
+
+@app.post("/api/auth/telegram-webapp")
+def telegram_webapp_auth(payload: TelegramAuthInput) -> dict:
+    tg_id_str = str(payload.telegramId).strip()
+    if not tg_id_str:
+        raise HTTPException(status_code=400, detail="telegramId обязателен")
+
+    email = f"tg_{tg_id_str}@telegram.tanap.ai"
+    user_id = f"user-tg-{tg_id_str}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    with connect() as connection:
+        user_row = connection.execute(
+            "SELECT * FROM users WHERE email = ? OR id = ?", (email, user_id)
+        ).fetchone()
+
+        if user_row is None:
+            connection.execute(
+                """
+                INSERT INTO users (id, name, email, password_hash, organization, region, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    payload.name.strip() or f"User {tg_id_str}",
+                    email,
+                    hash_password(f"tg_oauth_pass_{tg_id_str}"),
+                    payload.companyName.strip() or "КХ Партнёр",
+                    "Акмолинская область",
+                    now,
+                ),
+            )
+            profile_id = f"profile-tg-{tg_id_str}"
+            connection.execute(
+                """
+                INSERT INTO profiles (id, user_id, name, region, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    user_id,
+                    payload.companyName.strip() or "КХ Партнёр",
+                    "Акмолинская область",
+                    now,
+                ),
+            )
+            # Duplicate demo fields so the user immediately has full working data
+            demo_fields = connection.execute(
+                "SELECT * FROM fields WHERE is_demo = 1"
+            ).fetchall()
+            for df in demo_fields:
+                new_field_id = f"field-{uuid4()}"
+                connection.execute(
+                    """
+                    INSERT INTO fields (id, user_id, profile_id, name, crop_type, area_ha, perimeter_km, boundary_json, is_demo, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    """,
+                    (
+                        new_field_id,
+                        user_id,
+                        profile_id,
+                        df["name"],
+                        df["crop_type"],
+                        df["area_ha"],
+                        df["perimeter_km"],
+                        df["boundary_json"],
+                        now,
+                    ),
+                )
+            user_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        else:
+            # Update user info if provided
+            new_name = payload.name.strip() or user_row["name"]
+            new_org = payload.companyName.strip() or user_row["organization"]
+            connection.execute(
+                """
+                UPDATE users SET name = ?, organization = ? WHERE id = ?
+                """,
+                (new_name, new_org, user_row["id"]),
+            )
+            connection.execute(
+                """
+                UPDATE profiles SET name = ? WHERE user_id = ?
+                """,
+                (new_org, user_row["id"]),
+            )
+            user_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_row["id"],)).fetchone()
+
+    token = create_access_token(user_row["id"])
+    return {"token": token, "user": user_from_row(user_row)}
 
 
 @app.get("/api/auth/me")
