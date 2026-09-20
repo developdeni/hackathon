@@ -215,14 +215,49 @@ const zpStyles = StyleSheet.create({
   textActive: { fontFamily: fontFamilies.semiBold, color: colors.text },
 });
 
-function ActionRow({ title, destructive, onPress }: { title: string; destructive?: boolean; onPress: () => void }) {
+function ActionRow({
+  title,
+  subtitle,
+  destructive,
+  highlight,
+  onPress,
+}: {
+  title: string;
+  subtitle?: string;
+  destructive?: boolean;
+  highlight?: boolean;
+  onPress: () => void;
+}) {
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [arStyles.row, pressed && arStyles.pressed]}
+      style={({ pressed }) => [
+        arStyles.row,
+        highlight && arStyles.highlightRow,
+        pressed && arStyles.pressed,
+      ]}
     >
-      <Text style={[arStyles.text, destructive && arStyles.textDestructive]}>{title}</Text>
-      <Text style={[arStyles.chevron, destructive && arStyles.chevronDestructive]}>›</Text>
+      <View style={{ flex: 1, gap: subtitle ? 2 : 0 }}>
+        <Text
+          style={[
+            arStyles.text,
+            highlight && arStyles.textHighlight,
+            destructive && arStyles.textDestructive,
+          ]}
+        >
+          {title}
+        </Text>
+        {subtitle ? <Text style={arStyles.subtitle}>{subtitle}</Text> : null}
+      </View>
+      <Text
+        style={[
+          arStyles.chevron,
+          highlight && arStyles.chevronHighlight,
+          destructive && arStyles.chevronDestructive,
+        ]}
+      >
+        ›
+      </Text>
     </Pressable>
   );
 }
@@ -230,9 +265,13 @@ function ActionRow({ title, destructive, onPress }: { title: string; destructive
 const arStyles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 13, gap: 8 },
   pressed: { backgroundColor: colors.surfaceSecondary },
+  highlightRow: { backgroundColor: '#F1F8E9' },
   text: { flex: 1, fontFamily: fontFamilies.medium, fontSize: 14.5, color: colors.text },
+  textHighlight: { color: colors.primaryDark, fontFamily: fontFamilies.semiBold },
   textDestructive: { color: colors.danger },
+  subtitle: { fontFamily: fontFamilies.regular, fontSize: 11.5, color: colors.muted },
   chevron: { fontFamily: fontFamilies.regular, fontSize: 20, color: colors.muted },
+  chevronHighlight: { color: colors.primaryDark },
   chevronDestructive: { color: '#F4B4B4' },
 });
 
@@ -1144,9 +1183,12 @@ export default function FieldScreen() {
         <View style={styles.hairline} />
         <ActionRow title="Скачать GeoJSON для QGIS" onPress={() => void openExport('geojson')} />
         <View style={styles.hairline} />
-        <ActionRow title="Скачать CSV временного ряда" onPress={() => void openExport('csv')} />
-        <View style={styles.hairline} />
-        <ActionRow title="Скачать PDF-отчёт агронома" onPress={() => void openExport('pdf')} />
+        <ActionRow
+          title="Агропаспорт поля (PDF для АКК / Банков)"
+          subtitle="Кадастровые границы, 3 года Sentinel-2, класс ЗК РК"
+          highlight
+          onPress={() => void openExport('pdf')}
+        />
         <View style={styles.hairline} />
         <ActionRow title="Удалить участок" destructive onPress={confirmDelete} />
       </Card>

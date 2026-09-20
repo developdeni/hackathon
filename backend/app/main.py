@@ -888,14 +888,41 @@ async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) 
 
 
 @app.get("/api/fields/{field_id}/export/pdf")
+@app.get("/api/fields/{field_id}/export/passport")
 async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) -> Response:
+    from .agropassport_pdf import generate_agropassport_pdf
+
     field, satellite, zones, weather = await _load_analysis_bundle(field_id, user_id)
     classification = classify_land_use(satellite.get("observations", []))
-    pdf = _build_pdf_report(field, satellite, zones, weather, classification)
+
+    with connect() as connection:
+        history_rows = connection.execute(
+            "SELECT * FROM yield_history WHERE field_id = ? ORDER BY season_year DESC",
+            (field_id,),
+        ).fetchall()
+        user_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        profile_row = connection.execute(
+            "SELECT * FROM profiles WHERE id = ?", (field.get("profile_id"),)
+        ).fetchone()
+
+    yield_history = [yield_history_from_row(item) for item in history_rows]
+    user_dict = dict(user_row) if user_row else None
+    profile_dict = dict(profile_row) if profile_row else None
+
+    pdf = generate_agropassport_pdf(
+        field=field,
+        satellite=satellite,
+        zones=zones,
+        weather=weather,
+        classification=classification,
+        yield_history=yield_history,
+        user=user_dict,
+        farm_profile=profile_dict,
+    )
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers=_attachment_headers(f"tanap-{field_id}.pdf"),
+        headers=_attachment_headers(f"agropassport-{field_id}.pdf"),
     )
 
 
