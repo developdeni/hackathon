@@ -120,19 +120,22 @@ authForm.addEventListener('submit', async (e) => {
   submitBtn.disabled = true;
   submitBtn.innerHTML = '<span>Подключение...</span>';
 
-  const tgUser = tg?.initDataUnsafe?.user;
-  const telegramId = tgUser?.id || (Date.now() % 100000000);
-  const username = tgUser?.username || null;
+  const initData = tg?.initData;
+  if (!initData) {
+    showToast('Откройте Mini App из Telegram для безопасного входа');
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '<span>Войти через Telegram</span>';
+    return;
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/auth/telegram-webapp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        telegramId: String(telegramId),
+        initData,
         name: name,
         companyName: company,
-        username: username,
       }),
     });
 
@@ -264,7 +267,7 @@ function renderFields(fields) {
 
         <div class="field-actions">
           <button class="btn-field-action primary-accent" onclick="downloadAgropassport('${f.id}', '${f.name}')">
-            <span>📄 Агропаспорт PDF</span>
+            <span>📄 Полевой отчёт PDF</span>
           </button>
           <button class="btn-field-action" onclick="askAiAboutField('${f.name}', '${cropName}')">
             <span>🤖 Спросить AI</span>
@@ -278,7 +281,7 @@ function renderFields(fields) {
 // Download Agro-passport PDF
 function downloadAgropassport(fieldId, fieldName) {
   triggerHaptic('medium');
-  showToast(`Формирование агропаспорта для ${fieldName}...`);
+  showToast(`Формирование полевого отчёта для ${fieldName}...`);
 
   const url = `${API_BASE}/api/fields/${encodeURIComponent(fieldId)}/agropassport/pdf`;
 

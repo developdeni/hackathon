@@ -6,13 +6,39 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
-import numpy as np
+from dotenv import load_dotenv
 from PIL import Image
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L8PPAiT6XJDA7hdSOpVdXwsB6bCGMatS1FfzONO4oIgg")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+
+def _parse_gemini_keys() -> list[str]:
+    raw_keys = [
+        os.getenv("GEMINI_API_KEY", ""),
+        os.getenv("GEMINI_API_KEYS", ""),
+    ]
+    keys: list[str] = []
+    for raw in raw_keys:
+        for item in re.split(r"[\s,;]+", raw.strip()):
+            key = item.strip()
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
+GEMINI_API_KEYS = _parse_gemini_keys()
+
+
+def _gemini_model_urls(models: list[str]):
+    for api_key in GEMINI_API_KEYS:
+        for model_name in models:
+            yield api_key, model_name, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+
 # Каскад проверенных высокоскоростных моделей Google Gemini с активной квотой
 GEMINI_MODELS = [
     "gemini-flash-latest",
@@ -156,7 +182,7 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
     Sends the leaf/field photo to Google Gemini Multimodal Vision API
     with automatic model fallback (gemini-flash-latest -> gemini-3.6-flash -> gemini-3.5-flash).
     """
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
 
     try:
@@ -178,6 +204,8 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
             "category = \"none\", detected = false!\n\n"
             "КРИТИЧЕСКОЕ ПРАВИЛО 2 (ДИНАМИЧЕСКИЙ АНАЛИЗ БЕЗ ОГРАНИЧЕНИЙ):\n"
             "Формируй гипотезу по наблюдаемым визуальным признакам на снимке, НЕ ограничиваясь шаблонами.\n"
+            "Это не лабораторное измерение, не калиброванная вероятность и не подтверждённый диагноз. "
+            "Не называй проценты точностью, уверенностью или вероятностью; affected_area_percent — только видимая доля признаков в кадре.\n"
             "Определяй ЛЮБУЮ культуру региона (яровая пшеница, озимая пшеница, ячмень, яровой рапс, подсолнечник, лен масличный, овес, чечевица, горох, соя, кукуруза, картофель и др.).\n"
             "Диагностируй ЛЮБЫЕ патологии: листовые и стеблевые ржавчины (желтая, бурая, стеблевая), пятнистости (септориоз, гельминтоспориоз, темно-бурая, сетчатая), фузариоз колоса, альтернариоз, мучнистая роса, бактериозы, хлорозы, дефициты макро- и микроэлементов (N, P, K, Mg, S, Fe, Zn), гербицидный токсикоз.\n"
             "Идентифицируй любых вредителей (злаковая тля, хлебный жук, пьявица, трипсы, совка, саранча, клоп-черепашка, блошки) или сорные растения (осот розовый и желтый, вьюнок, овсюг, марь белая, щетинник, гречишка татарская, щирица).\n\n"
@@ -225,8 +253,7 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
         }
 
         # Мультимодальные модели Gemini для фото-диагностики
-        for model_name in VISION_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        for _api_key, model_name, url in _gemini_model_urls(VISION_MODELS):
             try:
                 with httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
                     resp = client.post(url, json=payload)
@@ -319,143 +346,6 @@ def analyze_crop_image_bytes(image_bytes: bytes, filename: str = "leaf.jpg") -> 
         "yield_loss": "Не рассчитывается по одному фото",
     }
 
-    # 2. Локальный спектральный анализатор (fallback при недоступности облачных моделей)
-    try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        # Resize to standardized analytical resolution
-        image.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        np_img = np.array(image, dtype=np.float32)
-
-        # Normalize 0..1
-        r = np_img[:, :, 0] / 255.0
-        g = np_img[:, :, 1] / 255.0
-        b = np_img[:, :, 2] / 255.0
-
-        # Excess Green Index (ExG = 2*G - R - B)
-        exg = 2.0 * g - r - b
-
-        # Fast HSV conversion to verify biological foliage chromaticity
-        max_c = np.maximum(np.maximum(r, g), b)
-        min_c = np.minimum(np.minimum(r, g), b)
-        diff = max_c - min_c
-
-        saturation = np.where(max_c == 0, 0, diff / (max_c + 1e-6))
-        value = max_c
-
-        hue = np.zeros_like(r)
-        mask_r = (max_c == r) & (diff > 1e-5)
-        mask_g = (max_c == g) & (diff > 1e-5)
-        mask_b = (max_c == b) & (diff > 1e-5)
-
-        hue[mask_r] = ((g[mask_r] - b[mask_r]) / diff[mask_r]) % 6
-        hue[mask_g] = ((b[mask_g] - r[mask_g]) / diff[mask_g]) + 2
-        hue[mask_b] = ((r[mask_b] - g[mask_b]) / diff[mask_b]) + 4
-        hue = hue / 6.0  # 0..1 range (0.13 to 0.45 corresponds to 48° - 162° yellow-green)
-
-        # Strict organic plant foliage mask: natural hue, organic saturation and brightness, ExG positive
-        plant_mask = (hue >= 0.13) & (hue <= 0.45) & (saturation >= 0.18) & (value >= 0.12) & (value <= 0.95) & (exg > 0.06)
-        plant_pixels = int(np.count_nonzero(plant_mask))
-        total_pixels = r.size
-        plant_ratio = float(plant_pixels) / max(total_pixels, 1)
-
-        # Non-plant rejection filter (computer screen, room interior, vehicle, paper, keyboard)
-        if plant_ratio < 0.15:
-            return {
-                "detected": False,
-                "category": "none",
-                "object_name": "Не растение (экран / интерьер / посторонний предмет)",
-                "crop": "—",
-                "diagnosis": "Растение на снимке не обнаружено",
-                "pathogen": "—",
-                "severity": "low",
-                "confidence": 0.88,
-                "affected_area_percent": 0.0,
-                "description": "На снимке преобладает посторонний фон, экран компьютера или интерьер помещения (растительный покров < 15%).",
-                "recommendation": "Направьте камеру на лист сельхозкультуры, сорняк или вредителя крупным планом при дневном свете.",
-                "chemicals": "—",
-                "rate": "—",
-                "weather_limits": "—",
-                "yield_loss": "0%",
-            }
-
-        # Color signature analysis on genuine vegetation pixels:
-        veg_r = r[plant_mask]
-        veg_g = g[plant_mask]
-        veg_b = b[plant_mask]
-
-        # Yellow rust signature: R > 0.52, G > 0.42, B < 0.35 (Orange/Yellow pustules)
-        yellow_pustule_mask = (veg_r > 0.52) & (veg_g > 0.42) & (veg_b < 0.35)
-        yellow_ratio = float(np.count_nonzero(yellow_pustule_mask)) / max(plant_pixels, 1)
-
-        # Necrosis / Septoria signature: dark brown spots (R in 0.30-0.5, G < 0.38, B < 0.28)
-        necrotic_mask = (veg_r > 0.30) & (veg_g < 0.38) & (veg_b < 0.28) & (veg_r > veg_g)
-        necrotic_ratio = float(np.count_nonzero(necrotic_mask)) / max(plant_pixels, 1)
-
-        # Nitrogen chlorosis: uniform pale green/yellow across the leaf
-        chlorosis_mask = (veg_g > 0.48) & (veg_r > 0.44) & (veg_b > 0.22) & (veg_g > veg_r)
-        chlorosis_ratio = float(np.count_nonzero(chlorosis_mask)) / max(plant_pixels, 1)
-
-        # Mildew / white coating: high brightness in all channels on plant
-        mildew_mask = (veg_r > 0.65) & (veg_g > 0.65) & (veg_b > 0.65)
-        mildew_ratio = float(np.count_nonzero(mildew_mask)) / max(plant_pixels, 1)
-
-        # Select diagnosis matching the strongest spectral anomaly
-        if yellow_ratio > 0.08:
-            diag = AGRONOMIC_DISEASES[0]  # Yellow rust
-            affected_pct = round(min(yellow_ratio * 2.2 * 100, 75.0), 1)
-            confidence = round(min(0.82 + yellow_ratio * 0.5, 0.96), 2)
-        elif necrotic_ratio > 0.07:
-            diag = AGRONOMIC_DISEASES[1]  # Septoria
-            affected_pct = round(min(necrotic_ratio * 2.4 * 100, 60.0), 1)
-            confidence = round(min(0.80 + necrotic_ratio * 0.5, 0.94), 2)
-        elif chlorosis_ratio > 0.18:
-            diag = AGRONOMIC_DISEASES[2]  # Nitrogen chlorosis
-            affected_pct = round(min(chlorosis_ratio * 100, 85.0), 1)
-            confidence = round(min(0.78 + chlorosis_ratio * 0.3, 0.92), 2)
-        elif mildew_ratio > 0.10:
-            diag = AGRONOMIC_DISEASES[3]  # Powdery mildew
-            affected_pct = round(min(mildew_ratio * 2.0 * 100, 50.0), 1)
-            confidence = round(min(0.75 + mildew_ratio * 0.4, 0.90), 2)
-        else:
-            diag = AGRONOMIC_DISEASES[5]  # Healthy plant
-            affected_pct = 0.0
-            confidence = 0.92
-
-        return {
-            "detected": True,
-            "category": "healthy" if diag is AGRONOMIC_DISEASES[5] else "disease",
-            "object_name": diag["name"],
-            "crop": diag["crop"],
-            "diagnosis": diag["name"],
-            "pathogen": diag["pathogen"],
-            "severity": diag["severity"],
-            "confidence": confidence,
-            "affected_area_percent": affected_pct,
-            "description": diag["description"],
-            "recommendation": diag["action"],
-            "chemicals": diag["chemicals"],
-            "rate": diag["rate"],
-            "weather_limits": diag["weather_limits"],
-            "yield_loss": diag["yield_loss"],
-        }
-    except Exception as exc:
-        return {
-            "detected": False,
-            "category": "none",
-            "object_name": "Ошибка анализа",
-            "crop": "Ошибка анализа",
-            "diagnosis": "Не удалось распознать структуру снимка",
-            "pathogen": str(exc),
-            "severity": "low",
-            "confidence": 0.0,
-            "affected_area_percent": 0.0,
-            "recommendation": "Попробуйте сделать повторный снимок с лучшим освещением.",
-            "chemicals": "—",
-            "rate": "—",
-            "weather_limits": "—",
-            "yield_loss": "—",
-        }
-
 
 # ---------------------------------------------------------------------------
 # Задача 3.2 — Оценка густоты стояния и подсчёт всходов по фото (в т.ч. с дрона)
@@ -491,6 +381,7 @@ _STAND_PROMPT = (
     "ПРАВИЛО 1 (валидация): если на материале НЕ посев/поле/всходы (экран, интерьер, человек, техника, "
     "один лист крупным планом без возможности счёта рядков) — верни detected=false, is_field=false.\n\n"
     "ПРАВИЛО 2 (подсчёт): перечисли и посчитай только различимые всходы/растения в типичном кадре. "
+    "Это визуальная оценка модели, а не лабораторный или калиброванный полевой замер. "
     "Оцени тип съёмки (shot_type): \"ground\" или \"drone\". Не угадывай площадь кадра, плотность "
     "на м²/га, процент пропусков или вероятность точности: без масштаба эти величины не измеримы.\n\n"
     "ПРАВИЛО 3 (агрооценка): определи вероятную культуру (crop) и только категориально оцени "
@@ -624,11 +515,10 @@ def _call_gemini_stand(
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
     deadline = time.monotonic() + timeout
-    for model_name in VISION_MODELS:
+    for _api_key, model_name, url in _gemini_model_urls(VISION_MODELS):
         remaining = deadline - time.monotonic()
         if remaining <= 1.0:
             break
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         try:
             request_timeout = min(remaining, 14.0)
             with httpx.Client(timeout=httpx.Timeout(request_timeout, connect=min(5.0, request_timeout))) as client:
@@ -646,7 +536,7 @@ def _query_gemini_stand_count(
     image_bytes: bytes, calibrated_area_m2: float | None = None
 ) -> dict[str, Any] | None:
     """Подсчёт всходов и густоты стояния по фото поля / кадру с дрона (inline image)."""
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
     try:
         im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -669,7 +559,7 @@ def _query_gemini_stand_count_frames(
     Быстрый путь: анализ нескольких репрезентативных кадров, извлечённых на телефоне,
     без загрузки всего видео (в разы быстрее по слабому интернету).
     """
-    if not GEMINI_API_KEY or not frame_bytes:
+    if not GEMINI_API_KEYS or not frame_bytes:
         return None
 
     media_parts: list[dict[str, Any]] = []
@@ -702,52 +592,55 @@ def _gemini_upload_video_file(video_bytes: bytes, mime_type: str) -> str | None:
     """
     try:
         size = len(video_bytes)
-        with httpx.Client(timeout=httpx.Timeout(60.0, connect=6.0)) as client:
-            start = client.post(
-                f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}",
-                headers={
-                    "X-Goog-Upload-Protocol": "resumable",
-                    "X-Goog-Upload-Command": "start",
-                    "X-Goog-Upload-Header-Content-Length": str(size),
-                    "X-Goog-Upload-Header-Content-Type": mime_type,
-                    "Content-Type": "application/json",
-                },
-                json={"file": {"display_name": "stand_video"}},
-            )
-            upload_url = start.headers.get("x-goog-upload-url") or start.headers.get("X-Goog-Upload-URL")
-            if not upload_url:
-                return None
+        for api_key in GEMINI_API_KEYS:
+            with httpx.Client(timeout=httpx.Timeout(60.0, connect=6.0)) as client:
+                start = client.post(
+                    f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}",
+                    headers={
+                        "X-Goog-Upload-Protocol": "resumable",
+                        "X-Goog-Upload-Command": "start",
+                        "X-Goog-Upload-Header-Content-Length": str(size),
+                        "X-Goog-Upload-Header-Content-Type": mime_type,
+                        "Content-Type": "application/json",
+                    },
+                    json={"file": {"display_name": "stand_video"}},
+                )
+                upload_url = start.headers.get("x-goog-upload-url") or start.headers.get("X-Goog-Upload-URL")
+                if not upload_url:
+                    continue
 
-            up = client.post(
-                upload_url,
-                headers={
-                    "Content-Length": str(size),
-                    "X-Goog-Upload-Offset": "0",
-                    "X-Goog-Upload-Command": "upload, finalize",
-                },
-                content=video_bytes,
-            )
-            info = up.json().get("file", {})
-            name = info.get("name")
-            file_uri = info.get("uri")
-            state = info.get("state")
-            if not name or not file_uri:
-                return None
+                up = client.post(
+                    upload_url,
+                    headers={
+                        "Content-Length": str(size),
+                        "X-Goog-Upload-Offset": "0",
+                        "X-Goog-Upload-Command": "upload, finalize",
+                    },
+                    content=video_bytes,
+                )
+                info = up.json().get("file", {})
+                name = info.get("name")
+                file_uri = info.get("uri")
+                state = info.get("state")
+                if not name or not file_uri:
+                    continue
 
-            # Опрос состояния до ACTIVE (видео обрабатывается несколько секунд)
-            for _ in range(20):
+                # Опрос состояния до ACTIVE (видео обрабатывается несколько секунд)
+                for _ in range(20):
+                    if state == "ACTIVE":
+                        return file_uri
+                    if state == "FAILED":
+                        break
+                    time.sleep(1.0)
+                    poll = client.get(
+                        f"https://generativelanguage.googleapis.com/v1beta/{name}?key={api_key}"
+                    )
+                    pj = poll.json()
+                    state = pj.get("state")
+                    file_uri = pj.get("uri", file_uri)
                 if state == "ACTIVE":
                     return file_uri
-                if state == "FAILED":
-                    return None
-                time.sleep(1.0)
-                poll = client.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/{name}?key={GEMINI_API_KEY}"
-                )
-                pj = poll.json()
-                state = pj.get("state")
-                file_uri = pj.get("uri", file_uri)
-            return file_uri if state == "ACTIVE" else None
+        return None
     except Exception:
         return None
 
@@ -757,7 +650,7 @@ def _query_gemini_stand_count_video(video_bytes: bytes, mime_type: str = "video/
     Подсчёт всходов и густоты по ВИДЕО (в т.ч. облёт дроном).
     Малые ролики — inline; крупные — через Files API. Кадрирование fps=1, первые 15с.
     """
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
     if not mime_type or not mime_type.startswith("video/"):
         mime_type = "video/mp4"
@@ -846,7 +739,7 @@ _GRAIN_PROMPT = (
     "ПРАВИЛО 1 (валидация): если на фото НЕ зерновая проба (экран, интерьер, человек, растение в поле, "
     "техника, посторонний предмет) — верни detected=false, is_grain=false.\n\n"
     "ПРАВИЛО 2 (анализ): определи культуру (crop: пшеница мягкая яровая, пшеница твердая, ячмень, овёс, рожь, рапс яровой, подсолнечник, лён масличный, "
-    "гречиха, просо, горох, чечевица и др.). Оцени приблизительные доли по числу/видимой площади "
+    "гречиха, просо, горох, чечевица и др.). Оцени приблизительные визуальные доли по числу/видимой площади "
     "объектов в этом кадре (не по массе; сумма ≈ 100):\n"
     "  • sound_percent — чистое доброкачественное (основное) зерно без дефектов;\n"
     "  • weed_impurity_percent — СОРНАЯ примесь: минеральная (земля, камешки, песок), органическая "
@@ -976,7 +869,7 @@ def _normalize_grain_result(parsed: dict[str, Any]) -> dict[str, Any]:
 
 def _query_gemini_grain_quality(image_bytes: bytes) -> dict[str, Any] | None:
     """Контроль качества зерна по фото пробы через Gemini Vision (каскад моделей)."""
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
     try:
         im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -994,8 +887,7 @@ def _query_gemini_grain_quality(image_bytes: bytes) -> dict[str, Any] | None:
         ]}],
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
     }
-    for model_name in VISION_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    for _api_key, model_name, url in _gemini_model_urls(VISION_MODELS):
         try:
             with httpx.Client(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
                 resp = client.post(url, json=payload)
@@ -1028,6 +920,7 @@ _LIVESTOCK_PROMPT = (
     "Ты — система предварительного визуального подсчёта поголовья Tanap AI для хозяйств Акмолинской области по фото (в т.ч. с дрона). "
     "Главное — аккуратно оценить число видимых животных: не пропустить настоящих и не пересчитать одно "
     "животное дважды и не принимать посторонние объекты за скот).\n\n"
+    "Это визуальная оценка по изображению, не калиброванная вероятность и не инвентаризационная ведомость.\n\n"
     "ПРАВИЛО 1 (валидация): если на фото НЕТ животных (пустое поле, экран, интерьер, техника, только люди) — "
     "верни detected=false, is_livestock=false, animals=[], total_count=0.\n\n"
     "ПРАВИЛО 2 (ГЛАВНАЯ МЕТОДИКА — ПОШТУЧНОЕ ПЕРЕЧИСЛЕНИЕ):\n"
@@ -1064,7 +957,7 @@ _LIVESTOCK_PROMPT = (
     '  "total_count": 2,\n'
     '  "crowding": "low | moderate | high",\n'
     '  "count_range": "7–7",\n'
-    '  "assessment": "Краткий вывод: сколько и каких животных, что влияло на точность",\n'
+    '  "assessment": "Краткий вывод: сколько и каких животных, что могло влиять на визуальный подсчёт",\n'
     '  "recommendation": "Совет для более точного подсчёта, если нужно"\n'
     "}\n"
 )
@@ -1211,7 +1104,7 @@ def _query_gemini_livestock(image_bytes: bytes) -> dict[str, Any] | None:
     Предварительный визуальный подсчёт поголовья скота через Gemini Vision.
     Высокое разрешение (видно далёких/мелких животных) + систематический счёт по сетке.
     """
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
     try:
         im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -1231,8 +1124,7 @@ def _query_gemini_livestock(image_bytes: bytes) -> dict[str, Any] | None:
         # temperature 0 reduces answer variance; it does not calibrate accuracy.
         "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
     }
-    for model_name in VISION_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    for _api_key, model_name, url in _gemini_model_urls(VISION_MODELS):
         try:
             with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
                 resp = client.post(url, json=payload)
@@ -1475,7 +1367,7 @@ def format_hidden_farm_context(farm_context: Any) -> str:
         if diag.get("severity"):
             lines.append(f"  • Степень: {diag['severity']}")
         if diag.get("affected_area_percent") is not None:
-            lines.append(f"  • Доля поражения в кадре: {diag['affected_area_percent']}%")
+            lines.append(f"  • Видимая доля признаков в кадре: {diag['affected_area_percent']}% (не лабораторная оценка распространённости)")
         if diag.get("chemicals"):
             lines.append(f"  • Рекомендуемые действующие вещества: {diag['chemicals']}")
         if diag.get("rate"):
@@ -1552,7 +1444,7 @@ def _query_gemini_chat(
     Injects territory coordinates, field catalog, and live weather secretly into systemInstruction.
     The user question and history remain completely clean without context clutter.
     """
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
 
     try:
@@ -1573,8 +1465,7 @@ def _query_gemini_chat(
             },
         }
 
-        for model_name in GEMINI_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        for _api_key, model_name, url in _gemini_model_urls(GEMINI_MODELS):
             try:
                 with httpx.Client(timeout=20.0) as client:
                     resp = client.post(url, json=payload)

@@ -1,7 +1,6 @@
 import { ComponentProps, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -19,6 +18,7 @@ import { createField, detectFieldBoundary, getField, updateField } from '../../s
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
 import { AutoBoundaryResult, Coordinate, Field } from '../../src/types/domain';
+import { notify } from '../../src/utils/notify';
 
 const DEFAULT_CENTER: Coordinate = { latitude: 53.283, longitude: 69.38 };
 const DEFAULT_WIDTH_M = 800;
@@ -60,7 +60,7 @@ export default function NewFieldScreen() {
         const field = await getField(requestedFieldId);
         if (mounted) applyField(field);
       } catch (error) {
-        Alert.alert('Участок не загружен', error instanceof Error ? error.message : 'Повторите попытку.');
+        notify('Участок не загружен', error instanceof Error ? error.message : 'Повторите попытку.');
       } finally {
         if (mounted) setLoading(false);
       }
@@ -94,7 +94,7 @@ export default function NewFieldScreen() {
     const width = parseMeters(widthMeters);
     const height = parseMeters(heightMeters);
     if (!parsedCenter || width === null || height === null) {
-      Alert.alert('Проверьте значения', 'Введите центр, ширину и длину числами.');
+      notify('Проверьте значения', 'Введите центр, ширину и длину числами.');
       return;
     }
     const nextBoundary = buildRectangle(parsedCenter, width, height);
@@ -156,7 +156,7 @@ export default function NewFieldScreen() {
 
   function removeCornerByIndex(index: number) {
     if (boundary.length <= 3) {
-      Alert.alert('Минимум 3 угла', 'Контур поля не может содержать меньше трёх вершин.');
+      notify('Минимум 3 угла', 'Контур поля не может содержать меньше трёх вершин.');
       return;
     }
     const next = boundary.filter((_, idx) => idx !== index);
@@ -266,7 +266,7 @@ export default function NewFieldScreen() {
         animated: true,
       });
     } catch (error) {
-      Alert.alert(
+      notify(
         'Автоконтур недоступен',
         error instanceof Error ? error.message : 'Не удалось выделить поле по снимку.',
       );
@@ -302,7 +302,7 @@ export default function NewFieldScreen() {
     try {
       const permission = await Location.requestForegroundPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert('Геопозиция не получена', 'Можно ввести координаты центра вручную.');
+        notify('Геопозиция не получена', 'Можно ввести координаты центра вручную.');
         return;
       }
       const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
@@ -315,7 +315,7 @@ export default function NewFieldScreen() {
       setAutoResult(null);
       mapRef.current?.animateToRegion(regionFromBoundary(nextBoundary), 400);
     } catch {
-      Alert.alert('Ошибка GPS', 'Не удалось получить координаты.');
+      notify('Ошибка GPS', 'Не удалось получить координаты.');
     } finally {
       setLocating(false);
     }
@@ -324,15 +324,15 @@ export default function NewFieldScreen() {
   async function save() {
     if (saving) return;
     if (name.trim().length < 2 || cropType.trim().length < 2) {
-      Alert.alert('Заполните данные', 'Введите название участка и культуру.');
+      notify('Заполните данные', 'Введите название участка и культуру.');
       return;
     }
     if (boundary.length < 3 || boundary.some((point) => !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude))) {
-      Alert.alert('Проверьте контур', 'В контуре должны быть корректные координаты углов.');
+      notify('Проверьте контур', 'В контуре должны быть корректные координаты углов.');
       return;
     }
     if (!isEditing && !profileId) {
-      Alert.alert('Профиль не выбран', 'Вернитесь и выберите профиль.');
+      notify('Профиль не выбран', 'Вернитесь и выберите профиль.');
       return;
     }
     setSaving(true);
@@ -343,7 +343,7 @@ export default function NewFieldScreen() {
         : await createField({ profileId: profileId as string, ...payload });
       router.replace({ pathname: '/field/[id]', params: { id: field.id } });
     } catch (error) {
-      Alert.alert('Не сохранено', error instanceof Error ? error.message : 'Повторите попытку.');
+      notify('Не сохранено', error instanceof Error ? error.message : 'Повторите попытку.');
       setSaving(false);
     }
   }
@@ -429,11 +429,7 @@ export default function NewFieldScreen() {
         </Text>
 
         <View style={styles.mapFrame}>
-          {Platform.OS === 'web' ? (
-            <View style={styles.mapFallback}>
-              <Text style={styles.mapFallbackText}>Карта доступна на iPhone</Text>
-            </View>
-          ) : (
+          {(
             <MapView
               ref={mapRef}
               style={styles.map}
@@ -450,6 +446,8 @@ export default function NewFieldScreen() {
                   <Marker
                     key={`corner-${index}`}
                     coordinate={point}
+                    label={index + 1}
+                    pinColor={isActive ? '#0E3A14' : colors.primary}
                     draggable={editMode === 'corners'}
                     hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
                     tracksViewChanges
@@ -594,7 +592,7 @@ export default function NewFieldScreen() {
                 {autoResult.needsReview ? 'Контур требует проверки' : 'Пашня распознана'}
               </Text>
               <Text style={[styles.autoStatusConfidence, autoResult.needsReview && styles.autoStatusConfidenceReview]}>
-                качество {Math.round(autoResult.qualityScore * 100)}/100
+                индекс границы {Math.round(autoResult.qualityScore * 100)}/100
               </Text>
             </View>
             <Text style={styles.autoStatusText}>

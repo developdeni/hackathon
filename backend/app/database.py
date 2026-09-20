@@ -110,6 +110,25 @@ def initialize_database() -> None:
         if "user_id" not in profile_columns:
             connection.execute("ALTER TABLE profiles ADD COLUMN user_id TEXT")
 
+        # Telegram account linking: which Telegram user id an app account is bound to.
+        user_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "telegram_id" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN telegram_id TEXT")
+
+        # Short-lived one-time codes that bind a Telegram user to an app account.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_link_codes (
+                code TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
         # Убираем старые ОБЩИЕ (не привязанные к пользователю) профили и поля —
         # именно они раньше показывались всем сразу. Теперь данные строго
         # индивидуальны, и новые аккаунты создаются ПУСТЫМИ (без демо-данных).
@@ -158,6 +177,7 @@ def field_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def user_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys()
     return {
         "id": row["id"],
         "name": row["name"],
@@ -165,6 +185,7 @@ def user_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "organization": row["organization"],
         "region": row["region"],
         "createdAt": row["created_at"],
+        "telegramLinked": bool(row["telegram_id"]) if "telegram_id" in keys else False,
     }
 
 

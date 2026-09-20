@@ -474,6 +474,21 @@ export default function FieldScreen() {
     };
   }, [field]);
 
+  // Must stay ABOVE the early returns below — calling a hook after a conditional
+  // `return` breaks the Rules of Hooks (React #310) and blanks the screen when the
+  // card first mounts in `loading` state (e.g. after creating a field).
+  const askAiAboutField = useCallback((cleanQuestion?: string) => {
+    if (!field) return;
+    router.replace({
+      pathname: '/',
+      params: {
+        tab: 'ai_tools',
+        fieldId: field.id,
+        aiPrompt: cleanQuestion || '',
+      },
+    });
+  }, [field, router]);
+
   // --- Loading / Error states ---
   if (loading) {
     return (
@@ -531,18 +546,6 @@ export default function FieldScreen() {
       Alert.alert('Не удалось открыть отчёт', e instanceof Error ? e.message : 'Повторите попытку.');
     }
   }
-
-  const askAiAboutField = useCallback((cleanQuestion?: string) => {
-    if (!field) return;
-    router.replace({
-      pathname: '/',
-      params: {
-        tab: 'ai_tools',
-        fieldId: field.id,
-        aiPrompt: cleanQuestion || '',
-      },
-    });
-  }, [field, router]);
 
   const ndviStatusColor = zonesData?.meanFieldNdvi != null
     ? (zonesData.meanFieldNdvi > 0.5 ? colors.success : colors.warning)
@@ -1037,12 +1040,7 @@ export default function FieldScreen() {
       </View>
 
       <View style={styles.mapFrame}>
-        {Platform.OS === 'web' ? (
-          <View style={styles.mapFallback}>
-            <Text style={styles.mapFallbackText}>Карта доступна на iOS / Android</Text>
-          </View>
-        ) : (
-          <MapView style={styles.map} initialRegion={region} mapType={mapType}>
+        <MapView style={styles.map} initialRegion={region} mapType={mapType}>
             <Polygon
               coordinates={field.boundary}
               fillColor={mapMode === 'boundary' ? 'rgba(30,126,52,0.10)' : 'rgba(30,126,52,0.04)'}
@@ -1073,8 +1071,7 @@ export default function FieldScreen() {
             {mapMode === 'zones' && selectedZone && (
               <Marker coordinate={selectedZone.centroid} title={selectedZone.title} description={`${selectedZone.areaHa.toFixed(1)} га`} />
             )}
-          </MapView>
-        )}
+        </MapView>
 
         <View style={styles.mapTag}>
           <Text style={styles.mapTagText} numberOfLines={1}>
@@ -1082,7 +1079,7 @@ export default function FieldScreen() {
               ? 'Sentinel-2 · кластеры аномалий'
               : mapMode === 'satellite'
               ? (zonesData?.ndviGrid.length ? `Сетка NDVI · ${zonesData.ndviGrid.length} ячеек` : 'Ожидание данных Sentinel-2')
-              : 'Кадастровый контур участка'}
+              : 'Сохранённый контур участка'}
           </Text>
         </View>
 
@@ -1244,8 +1241,8 @@ export default function FieldScreen() {
         <ActionRow title="Скачать GeoJSON для QGIS" onPress={() => void openExport('geojson')} />
         <View style={styles.hairline} />
         <ActionRow
-          title="Агропаспорт поля (PDF для АКК / Банков)"
-          subtitle="Кадастровые границы, 3 года Sentinel-2, класс ЗК РК"
+          title="Полевой аналитический отчёт (PDF)"
+          subtitle="Контур, доступные данные Sentinel-2, погода и прогноз"
           highlight
           onPress={() => void openExport('pdf')}
         />

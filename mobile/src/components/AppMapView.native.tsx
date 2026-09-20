@@ -1,5 +1,12 @@
-import MapView, { Marker, Polygon, Callout } from 'react-native-maps';
-import type { MapPressEvent, Region } from 'react-native-maps';
+import type { ComponentType } from 'react';
+import MapView, { Marker as RNMarker, Polygon, Callout } from 'react-native-maps';
+import type { MapMarkerProps, MapPressEvent, Region } from 'react-native-maps';
+
+// Widen Marker props with the cross-platform `label` used by the web/android maps
+// (react-native-maps ignores it at runtime; the web/android maps render it).
+const Marker = RNMarker as unknown as ComponentType<
+  MapMarkerProps & { label?: string | number }
+>;
 
 export default MapView;
 export { Marker, Polygon, Callout };

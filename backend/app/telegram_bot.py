@@ -6,10 +6,53 @@ import httpx
 logger = logging.getLogger("telegram_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8885044592:AAEAXGQKCrNnQqC__eduZ8iSDYGtHsArEsA")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://lamps-sat-increases-pencil.trycloudflare.com/tma/")
+# Local Tanap AI backend (same host) — used to confirm account-link codes.
+LOCAL_API_BASE = os.getenv("LOCAL_API_BASE", "http://127.0.0.1:8000")
 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+
+async def send_text(chat_id: int, text: str) -> None:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(
+            f"{API_BASE}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        )
+
+
+async def handle_link_code(chat_id: int, from_user: dict, code: str) -> None:
+    """Bind the Telegram user to the app account that generated `code`."""
+    tg_id = from_user.get("id")
+    tg_name = " ".join(
+        p for p in [from_user.get("first_name"), from_user.get("last_name")] if p
+    ) or from_user.get("username") or "Агроном"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{LOCAL_API_BASE}/api/auth/telegram-link-confirm",
+                json={"code": code, "telegramId": tg_id, "telegramName": tg_name},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            name = data.get("name", "")
+            merged = data.get("merged")
+            extra = " Ваши прежние данные из Telegram-входа объединены в один аккаунт." if merged else ""
+            await send_text(
+                chat_id,
+                f"✅ <b>Telegram привязан к аккаунту «{name}».</b>{extra}\n\n"
+                "Теперь вход через Telegram открывает этот же аккаунт. Откройте приложение кнопкой меню 🌾.",
+            )
+        else:
+            try:
+                detail = resp.json().get("detail", "Не удалось привязать аккаунт.")
+            except Exception:
+                detail = "Не удалось привязать аккаунт."
+            await send_text(chat_id, f"⚠️ {detail}\n\nСгенерируйте новый код в приложении и повторите.")
+    except Exception as exc:
+        logger.error("link confirm error: %s", exc)
+        await send_text(chat_id, "⚠️ Сервис привязки временно недоступен. Повторите позже.")
 
 
 async def setup_bot_ui():
@@ -46,7 +89,7 @@ async def send_welcome_message(chat_id: int, user_first_name: str = "Агрон�
         "для хозяйств Казахстана (Акмолинская, Костанайская, СКО и другие регионы):\n\n"
         "• 🛰️ <b>Sentinel-2 L2A</b>: спектральный мониторинг полей, биомасса NDVI и влагообеспеченность NDMI\n"
         "• 🤖 <b>AI-Агроном Google Gemini</b>: расчёт норм высева, защита растений, листовые подкормки и баковые смеси\n"
-        "• 📄 <b>Агрономический паспорт</b>: официальный PDF в 1 клик для АО «АКК» и банков\n"
+        "• 📄 <b>Полевой отчёт</b>: спутниковая аналитика и данные хозяйства в PDF\n"
         "• ⚡ <b>Мгновенный доступ</b>: вход без пароля прямо через Telegram!\n\n"
         "<i>Нажмите кнопку ниже для запуска платформы:</i>"
     )
@@ -64,7 +107,7 @@ async def send_welcome_message(chat_id: int, user_first_name: str = "Агрон�
                 ],
                 [
                     {
-                        "text": "📋 Мои поля и кадастр",
+                        "text": "📋 Мои поля и отчёты",
                         "web_app": {"url": MINI_APP_URL},
                     }
                 ],
@@ -76,6 +119,8 @@ async def send_welcome_message(chat_id: int, user_first_name: str = "Агрон�
 
 
 async def poll_telegram_updates():
+    if not BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     """Lightweight long-polling loop for the bot."""
     await setup_bot_ui()
     offset = 0
@@ -98,7 +143,18 @@ async def poll_telegram_updates():
                         chat_id = msg.get("chat", {}).get("id")
                         from_user = msg.get("from", {})
                         first_name = from_user.get("first_name", "Агроном")
-                        if chat_id:
+                        text = (msg.get("text") or "").strip()
+                        if not chat_id:
+                            continue
+                        # Deep-link account binding: `/start link<code>`
+                        payload_arg = ""
+                        if text.startswith("/start"):
+                            parts = text.split(maxsplit=1)
+                            if len(parts) > 1:
+                                payload_arg = parts[1].strip()
+                        if payload_arg.startswith("link") and len(payload_arg) > 4:
+                            await handle_link_code(chat_id, from_user, payload_arg[4:])
+                        else:
                             await send_welcome_message(chat_id, first_name)
                 elif resp.status_code == 409:
                     logger.warning("Conflict with another instance, retrying...")

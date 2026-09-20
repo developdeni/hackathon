@@ -1,23 +1,7 @@
-"""
-Агрономический паспорт земельного участка (Агропаспорт поля в один клик).
-Официальный PDF-документ для АО «Аграрная кредитная корпорация» (АКК),
-банков второго уровня (Halyk, Forte, Jusan), АО «КазАгроФинанс» и земельной инспекции МСХ РК.
-
-Включает:
-- Официальные реквизиты и кадастровый номер земельного участка
-- Заключение о добросовестном землепользовании (ст. 92 Земельного кодекса РК)
-- Векторную картосхему поля с сеткой, масштабом, розой ветров и номерами вершин
-- Каталог поворотных геодезических точек (WGS-84, румбы/дистанции)
-- Спутниковую историю вегетации Sentinel-2 L2A за 3 года (2024–2026)
-- Агроклиматический баланс (GDD, осадки, испарение, влажность)
-- Прогноз урожайности и индикативную залоговую стоимость валового сбора в тенге (₸)
-- Фитосанитарный мониторинг очагов риска
-- Электронно-цифровой штемпель и верификационный QR-код
-"""
+"""Analytical field report built only from data available to Tanap AI."""
 
 from __future__ import annotations
 
-import hashlib
 import io
 import math
 from datetime import datetime, timezone
@@ -25,8 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image as PILImage, ImageDraw, ImageFont
-from reportlab.graphics.barcode.qr import QrCodeWidget
-from reportlab.graphics.shapes import Drawing, Group, Rect, String
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -36,7 +18,6 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     HRFlowable,
     Image,
-    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -122,7 +103,7 @@ def _draw_page_decorations(canv: canvas.Canvas, doc: Any) -> None:
     # Нижний колонтитул
     canv.setFont(FONT_REGULAR, 7.5)
     canv.setFillColor(colors.HexColor("#8E8E93"))
-    footer_left = "Агрономический паспорт Tanap AI · Спутниковый мониторинг Sentinel-2 (Copernicus) · АКК / МСХ РК"
+    footer_left = "Полевой аналитический отчёт Tanap AI · Sentinel-2 (Copernicus)"
     canv.drawString(36, 22, footer_left)
 
     page_num = doc.page if hasattr(doc, "page") else 1
@@ -152,15 +133,6 @@ def _to_dms(degrees: float, is_lat: bool) -> str:
     m = int((deg_abs - d) * 60)
     s = (deg_abs - d - m / 60) * 3600
     return f"{d}°{m:02d}'{s:04.1f}\"{direction}"
-
-
-def _generate_cadastral_code(lat: float, lon: float, field_id: str) -> str:
-    """Генерирует кадастровый идентификатор по формату земельного кадастра РК (01:XXX:XXXXX)."""
-    h = hashlib.sha256(f"{lat:.4f}_{lon:.4f}_{field_id}".encode()).hexdigest()
-    district_code = str(10 + (int(h[:2], 16) % 90))
-    block_code = str(100 + (int(h[2:5], 16) % 900))
-    parcel_code = str(1000 + (int(h[5:9], 16) % 9000))
-    return f"01:{district_code}:{block_code}:{parcel_code}"
 
 
 # ---------------------------------------------------------------------------
@@ -288,12 +260,11 @@ def generate_agropassport_pdf(
     weather: dict[str, Any],
     classification: dict[str, Any],
     yield_history: list[dict[str, Any]] | None = None,
+    yield_forecast: dict[str, Any] | None = None,
     user: dict[str, Any] | None = None,
     farm_profile: dict[str, Any] | None = None,
 ) -> bytes:
-    """
-    Генерирует полный двухстраничный официальный «Агрономический паспорт земельного участка».
-    """
+    """Generate a two-page analytical report without legal or cadastral claims."""
     _init_fonts()
     buffer = io.BytesIO()
 
@@ -392,17 +363,20 @@ def generate_agropassport_pdf(
     perimeter_m = float(field.get("perimeterKm", 0.0)) * 1000.0 or 0.0
     crop_type = str(field.get("cropType") or "Яровая пшеница")
 
-    cadastral_num = _generate_cadastral_code(center_lat, center_lon, str(field.get("id", "")))
-    reg_number = f"KZ-AKM-{datetime.now().year}-{cadastral_num.split(':')[-1]}"
+    report_id = f"TANAP-{str(field.get('id', 'FIELD')).replace('field-', '')[:12].upper()}"
     doc_date = datetime.now(timezone.utc).strftime("%d.%m.%Y")
-    valid_until = f"31.12.{datetime.now().year}"
 
     farm_name = (
         (farm_profile.get("name") if farm_profile else None)
         or (user.get("organization") if user else None)
-        or "ТОО «Агро-Акмола Холдинг»"
+        or "Не указано"
     )
-    user_fio = (user.get("name") if user else None) or "Жумабаев Д. С."
+    user_fio = (user.get("name") if user else None) or "Не указано"
+    region = (
+        (farm_profile.get("region") if farm_profile else None)
+        or (user.get("region") if user else None)
+        or "Не указан"
+    )
 
     story: list[Any] = []
 
@@ -413,15 +387,15 @@ def generate_agropassport_pdf(
     # 1. Шапка документа
     header_data = [
         [
-            Paragraph("РЕСПУБЛИКА КАЗАХСТАН · МИНИСТЕРСТВО СЕЛЬСКОГО ХОЗЯЙСТВА<br/><b>ГОСУДАРСТВЕННЫЙ АГРОНОМИЧЕСКИЙ ГЕОМОНИТОРИНГ · TANAP AI</b>", style_doc_subtitle),
+            Paragraph("TANAP AI · СПУТНИКОВЫЙ И ПОЛЕВОЙ МОНИТОРИНГ", style_doc_subtitle),
         ],
         [
-            Paragraph("АГРОНОМИЧЕСКИЙ ПАСПОРТ ЗЕМЕЛЬНОГО УЧАСТКА", style_doc_title),
+            Paragraph("ПОЛЕВОЙ АНАЛИТИЧЕСКИЙ ОТЧЁТ", style_doc_title),
         ],
         [
             Paragraph(
-                f"<b>Регистрационный номер:</b> {reg_number} · <b>Дата выдачи:</b> {doc_date} · <b>Действителен до:</b> {valid_until}<br/>"
-                "<i>Назначение: Для предоставления в АО «Аграрная кредитная корпорация» (АКК), банки второго уровня (БВУ) и органы земельной инспекции МСХ РК</i>",
+                f"<b>ID отчёта:</b> {report_id} · <b>Сформирован:</b> {doc_date}<br/>"
+                "<i>Аналитический материал. Не является кадастровым документом, юридическим заключением или банковской оценкой.</i>",
                 style_doc_subtitle,
             ),
         ],
@@ -435,24 +409,24 @@ def generate_agropassport_pdf(
     story.append(t_header)
     story.append(Spacer(1, 6))
 
-    # 2. Блок I: Кадастровые и идентификационные характеристики
-    story.append(Paragraph("РАЗДЕЛ I. ИДЕНТИФИКАЦИОННЫЕ И КАДАСТРОВЫЕ СВЕДЕНИЯ", style_h2))
+    # 2. Блок I: сведения из учётной записи и пользовательского контура
+    story.append(Paragraph("РАЗДЕЛ I. СВЕДЕНИЯ О ПОЛЕ", style_h2))
 
     info_data = [
         [
             Paragraph("<b>Землепользователь:</b>", style_td),
             Paragraph(f"{farm_name} (Руководитель: {user_fio})", style_td),
-            Paragraph("<b>Кадастровый номер:</b>", style_td),
-            Paragraph(f"<b>{cadastral_num}</b>", style_td_bold),
+            Paragraph("<b>Внутренний ID поля:</b>", style_td),
+            Paragraph(str(field.get("id") or "Не указан"), style_td_bold),
         ],
         [
             Paragraph("<b>Наименование участка:</b>", style_td),
             Paragraph(field_name, style_td),
-            Paragraph("<b>Категория земель:</b>", style_td),
-            Paragraph("Земли с.-х. назначения (пашня)", style_td),
+            Paragraph("<b>Источник границы:</b>", style_td),
+            Paragraph("Контур, сохранённый пользователем", style_td),
         ],
         [
-            Paragraph("<b>Площадь (геодезич.):</b>", style_td),
+            Paragraph("<b>Расчётная площадь:</b>", style_td),
             Paragraph(f"<b>{area_ha:.1f} га</b>", style_td_bold),
             Paragraph("<b>Периметр участка:</b>", style_td),
             Paragraph(f"{perimeter_m:,.0f} м".replace(",", " "), style_td),
@@ -465,9 +439,9 @@ def generate_agropassport_pdf(
         ],
         [
             Paragraph("<b>Регион расположения:</b>", style_td),
-            Paragraph("Республика Казахстан, Акмолинская область", style_td),
+            Paragraph(str(region), style_td),
             Paragraph("<b>Система координат:</b>", style_td),
-            Paragraph("WGS-84 (Эллипсоид ITRF2014)", style_td),
+            Paragraph("WGS-84", style_td),
         ],
     ]
     t_info = Table(info_data, colWidths=[110, 160, 110, 143])
@@ -480,24 +454,19 @@ def generate_agropassport_pdf(
     story.append(t_info)
     story.append(Spacer(1, 7))
 
-    # 3. Блок II: Заключение о целевом использовании (ст. 92 Земельного кодекса РК)
-    story.append(Paragraph("РАЗДЕЛ II. ЗАКЛЮЧЕНИЕ О ДОБРОСОВЕСТНОМ СЕЛЬХОЗИСПОЛЬЗОВАНИИ (СТ. 92 ЗК РК)", style_h2))
+    # 3. Блок II: аналитическая классификация по доступному ряду NDVI
+    story.append(Paragraph("РАЗДЕЛ II. СПУТНИКОВАЯ КЛАССИФИКАЦИЯ ИСПОЛЬЗОВАНИЯ", style_h2))
 
-    amp_val = classification.get("amplitude") or 0.38
-    is_active = (classification.get("status") == "active") or (amp_val >= 0.30)
-    badge_title = (
-        "[ СООТВЕТСТВУЕТ ] ПОДТВЕРЖДЕНО ДОБРОСОВЕСТНОЕ ЗЕМЛЕПОЛЬЗОВАНИЕ (УЧАСТОК В АКТИВНОМ СЕЛЬХОЗОБОРОТЕ)"
-        if is_active
-        else "[ ВНИМАНИЕ ] ТРЕБУЕТСЯ НАЗЕМНАЯ ВЕРИФИКАЦИЯ (НИЗКАЯ СЕЗОННАЯ АМПЛИТУДА)"
-    )
-
+    class_label = classification.get("label") or "Недостаточно данных"
+    amplitude = classification.get("amplitude")
+    amplitude_text = f"{amplitude:.2f}" if isinstance(amplitude, (int, float)) else "нет данных"
+    badge_title = f"СПУТНИКОВАЯ КЛАССИФИКАЦИЯ: {str(class_label).upper()}"
     verdict_text = (
-        f"По данным космического мониторинга спутником <b>Sentinel-2 L2A (ЕКА/Copernicus)</b> за вегетационный период "
-        f"на участке зафиксирована выраженная сезонная вегетативная динамика яровой культуры. "
-        f"Сезонная амплитуда вегетационного индекса составила <b>ΔNDVI = {amp_val:.2f}</b> (при нормативном пороге активного оборота &gt; 0.35). "
-        f"Доля активно вегетирующей пашни составляет <b>98.2%</b> площади контура. "
-        f"Признаков длительной залежи, зарастания сорной растительностью либо необоснованного неиспользования по ст. 92 Земельного кодекса РК "
-        f"<b>НЕ ВЫЯВЛЕНО</b>. Земельный участок признан добросовестно освоенным и удовлетворяет критериям кредитования АО «АКК» и субсидирования МСХ РК."
+        f"Классификация рассчитана по доступным наблюдениям Sentinel-2. "
+        f"Сезонная амплитуда NDVI: <b>{amplitude_text}</b>. "
+        f"{classification.get('description') or 'Наблюдений недостаточно для устойчивой классификации.'} "
+        "Результат является дистанционной аналитической оценкой и требует проверки на поле; он не подтверждает "
+        "правовой статус или соблюдение требований земельного законодательства."
     )
 
     verdict_box = [
@@ -515,8 +484,8 @@ def generate_agropassport_pdf(
     story.append(t_verdict)
     story.append(Spacer(1, 7))
 
-    # 4. Блок III: Картосхема поля и каталог поворотных точек (GIS Map & Points)
-    story.append(Paragraph("РАЗДЕЛ III. КАРТОСХЕМА ГРАНИЦ И ГЕОДЕЗИЧЕСКИЙ КАТАЛОГ ТОЧЕК", style_h2))
+    # 4. Блок III: картосхема и координаты пользовательского контура
+    story.append(Paragraph("РАЗДЕЛ III. КАРТОСХЕМА И КООРДИНАТЫ КОНТУРА", style_h2))
 
     # Генерируем картосхему поля через Pillow
     map_png_bytes = _render_field_map_image(boundary, field_name, area_ha)
@@ -578,8 +547,8 @@ def generate_agropassport_pdf(
     # Шапка листа 2
     p2_header = Table([
         [
-            Paragraph("<b>ПРИЛОЖЕНИЕ К АГРОНОМИЧЕСКОМУ ПАСПОРТУ · ТЕХНИЧЕСКАЯ И АНАЛИТИЧЕСКАЯ ЧАСТЬ</b>", style_doc_subtitle),
-            Paragraph(f"<b>Паспорт:</b> {reg_number}", ParagraphStyle("Right", parent=style_doc_subtitle, alignment=2)),
+            Paragraph("<b>ТЕХНИЧЕСКАЯ И АНАЛИТИЧЕСКАЯ ЧАСТЬ</b>", style_doc_subtitle),
+            Paragraph(f"<b>Отчёт:</b> {report_id}", ParagraphStyle("Right", parent=style_doc_subtitle, alignment=2)),
         ]
     ], colWidths=[360, 163])
     p2_header.setStyle(TableStyle([("PADDING", (0, 0), (-1, -1), 0)]))
@@ -587,110 +556,92 @@ def generate_agropassport_pdf(
     story.append(Spacer(1, 4))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#D1D1D6"), spaceBefore=2, spaceAfter=6))
 
-    # 5. Блок IV: 3-летняя ретроспективная спутниковая история (2024–2026)
-    story.append(Paragraph("РАЗДЕЛ IV. 3-ЛЕТНЯЯ СПУТНИКОВАЯ ИСТОРИЯ ВЕГЕТАЦИИ (SENTINEL-2 L2A)", style_h2))
-
-    # Извлекаем исторические сезоны
-    hist_2024 = next((item for item in (yield_history or []) if item.get("seasonYear") == 2024), None)
-    hist_2025 = next((item for item in (yield_history or []) if item.get("seasonYear") == 2025), None)
-
-    crop_2024 = hist_2024.get("cropType", "Ячмень яровой") if hist_2024 else "Ячмень яровой"
-    yield_2024 = f"{hist_2024['yieldTPerHa']:.2f} т/га" if hist_2024 else "1.65 т/га (стат.)"
-
-    crop_2025 = hist_2025.get("cropType", "Яровая пшеница") if hist_2025 else "Яровая пшеница"
-    yield_2025 = f"{hist_2025['yieldTPerHa']:.2f} т/га" if hist_2025 else "1.88 т/га (стат.)"
-
-    latest_obs = satellite.get("observations", [])[-1] if satellite.get("observations") else {}
-    current_ndvi = latest_obs.get("ndviMean") or 0.68
-    current_ndmi = latest_obs.get("ndmiMean") or 0.18
-
+    # 5. Блок IV: фактические наблюдения Sentinel-2
+    story.append(Paragraph("РАЗДЕЛ IV. ДОСТУПНЫЕ НАБЛЮДЕНИЯ SENTINEL-2 L2A", style_h2))
     history_data = [
         [
-            Paragraph("Сезон", style_th),
-            Paragraph("Культура в обороте", style_th),
-            Paragraph("Пик NDVI", style_th),
-            Paragraph("Влага NDMI", style_th),
-            Paragraph("Осадки (май-авг)", style_th),
-            Paragraph("Урожайность", style_th),
-            Paragraph("Статус по ЗК РК", style_th),
-        ],
-        [
-            Paragraph("<b>2024</b>", style_td_center),
-            Paragraph(crop_2024, style_td),
-            Paragraph("0.62 (оптимум)", style_td_center),
-            Paragraph("0.19 (удовл.)", style_td_center),
-            Paragraph("192 мм (норма)", style_td_center),
-            Paragraph(yield_2024, style_td_center),
-            Paragraph("В обороте [ОК]", style_td_bold),
-        ],
-        [
-            Paragraph("<b>2025</b>", style_td_center),
-            Paragraph(crop_2025, style_td),
-            Paragraph("0.71 (высокий)", style_td_center),
-            Paragraph("0.22 (хорошо)", style_td_center),
-            Paragraph("218 мм (+14%)", style_td_center),
-            Paragraph(yield_2025, style_td_center),
-            Paragraph("В обороте [ОК]", style_td_bold),
-        ],
-        [
-            Paragraph("<b>2026</b>", style_td_center),
-            Paragraph(f"<b>{crop_type}</b>", style_td),
-            Paragraph(f"<b>{current_ndvi:.2f}</b> (вегет.)", style_td_center),
-            Paragraph(f"<b>{current_ndmi:.2f}</b> (норма)", style_td_center),
-            Paragraph("Текущий сезон", style_td_center),
-            Paragraph("~1.85 т/га (модель)", style_td_center),
-            Paragraph("В обороте [ОК]", style_td_bold),
+            Paragraph("Дата", style_th),
+            Paragraph("NDVI", style_th),
+            Paragraph("NDMI", style_th),
+            Paragraph("Ясные пиксели", style_th),
+            Paragraph("Надёжность", style_th),
+            Paragraph("Источник", style_th),
         ],
     ]
-    t_history = Table(history_data, colWidths=[38, 110, 75, 70, 80, 80, 70])
+    observations = satellite.get("observations") or []
+    for obs in observations[-3:]:
+        ndvi = obs.get("ndviMedian") if obs.get("ndviMedian") is not None else obs.get("ndviMean")
+        ndmi = obs.get("ndmiMean")
+        clear = obs.get("clearPixelPercent")
+        history_data.append([
+            Paragraph(str(obs.get("date") or "Нет даты"), style_td_center),
+            Paragraph(f"{ndvi:.3f}" if isinstance(ndvi, (int, float)) else "Нет данных", style_td_center),
+            Paragraph(f"{ndmi:.3f}" if isinstance(ndmi, (int, float)) else "Нет данных", style_td_center),
+            Paragraph(f"{clear:.0f}%" if isinstance(clear, (int, float)) else "Нет данных", style_td_center),
+            Paragraph(str(obs.get("reliability") or "Не оценена"), style_td_center),
+            Paragraph(str(satellite.get("source") or "Copernicus Sentinel-2"), style_td),
+        ])
+    if not observations:
+        history_data.append([
+            Paragraph("Нет данных", style_td_center),
+            Paragraph("—", style_td_center),
+            Paragraph("—", style_td_center),
+            Paragraph("—", style_td_center),
+            Paragraph("—", style_td_center),
+            Paragraph(str(satellite.get("message") or "Наблюдения недоступны"), style_td),
+        ])
+    t_history = Table(history_data, colWidths=[72, 62, 62, 90, 85, 152])
     t_history.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D1D6")),
-        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#FFFFFF")),
-        ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#F8F9FA")),
-        ("BACKGROUND", (0, 3), (-1, 3), colors.HexColor("#E8F5E9")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8F9FA")]),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("PADDING", (0, 0), (-1, -1), 3.5),
     ]))
     story.append(t_history)
     story.append(Spacer(1, 6))
 
-    # 6. Блок V: Агроклиматический баланс, прогноз урожайности и залоговая стоимость
-    story.append(Paragraph("РАЗДЕЛ V. АГРОКЛИМАТИЧЕСКИЙ БАЛАНС И ОЦЕНКА ВАЛОВОГО СБОРА", style_h2))
+    # 6. Блок V: фактическая погода и модельный прогноз урожайности
+    story.append(Paragraph("РАЗДЕЛ V. ПОГОДА И ПРОГНОЗ УРОЖАЙНОСТИ", style_h2))
 
-    # Финансово-урожайный расчет
-    expected_yield_t_ha = 1.85
-    valovoy_sbor_tons = expected_yield_t_ha * area_ha
-    price_per_ton_kzt = 105000.0  # Индикативная цена пшеницы 3 класса (Продкорпорация РК)
-    total_val_kzt = valovoy_sbor_tons * price_per_ton_kzt
+    forecast_data = yield_forecast or {}
+    forecast_value = forecast_data.get("forecastTPerHa")
+    interval = forecast_data.get("interval80") or {}
+    forecast_text = "Нет данных"
+    gross_text = "Нет данных"
+    if isinstance(forecast_value, (int, float)):
+        forecast_text = f"{forecast_value:.2f} т/га"
+        if isinstance(interval.get("low"), (int, float)) and isinstance(interval.get("high"), (int, float)):
+            forecast_text += f" (80% ДИ {interval['low']:.2f}–{interval['high']:.2f})"
+        gross_text = f"{forecast_value * area_ha:,.1f} т".replace(",", " ")
 
     current_w = weather.get("current", {})
     forecast_w = weather.get("forecast7d", {})
 
     agro_data = [
         [
-            Paragraph("<b>Сумма активных темп. (GDD &gt; 5°C):</b>", style_td),
-            Paragraph("~1 480°C (оптимум для налива)", style_td),
+            Paragraph("<b>Текущая температура:</b>", style_td),
+            Paragraph(f"{current_w['temperature']:.1f}°C" if isinstance(current_w.get("temperature"), (int, float)) else "Нет данных", style_td),
             Paragraph("<b>Модельный прогноз урожая:</b>", style_td),
-            Paragraph(f"<b>{expected_yield_t_ha:.2f} т/га</b> (диапазон 1.62 – 2.08)", style_td_bold),
+            Paragraph(f"<b>{forecast_text}</b>", style_td_bold),
         ],
         [
             Paragraph("<b>Осадки 7-дневный прогноз:</b>", style_td),
-            Paragraph(f"{forecast_w.get('precipSum', 12.0)} мм (благоприятно)", style_td),
+            Paragraph(f"{forecast_w['precipSum']:.1f} мм" if isinstance(forecast_w.get("precipSum"), (int, float)) else "Нет данных", style_td),
             Paragraph("<b>Ожидаемый валовой сбор:</b>", style_td),
-            Paragraph(f"<b>{valovoy_sbor_tons:,.0f} тонн</b>".replace(",", " "), style_td_bold),
+            Paragraph(f"<b>{gross_text}</b>", style_td_bold),
         ],
         [
             Paragraph("<b>Текущая темп. и влажность:</b>", style_td),
-            Paragraph(f"{current_w.get('temperature', 18.0):.1f}°C · влажность {current_w.get('humidity', 55)}%", style_td),
-            Paragraph("<b>Индикативная залоговая стоимость:</b>", style_td),
-            Paragraph(f"<b>{total_val_kzt:,.0f} тенге</b>".replace(",", " "), ParagraphStyle("KztVal", parent=style_td_bold, textColor=colors.HexColor("#0D5302"))),
+            Paragraph(f"{current_w['humidity']:.0f}%" if isinstance(current_w.get("humidity"), (int, float)) else "Нет данных", style_td),
+            Paragraph("<b>История урожайности:</b>", style_td),
+            Paragraph(f"{len(yield_history or [])} записей хозяйства", style_td),
         ],
         [
-            Paragraph("<b>Индекс риска засухи / суховея:</b>", style_td),
-            Paragraph("Низкий (почва обеспечена продуктивной влагой)", style_td),
-            Paragraph("<b>Базовая цена зерна (Продкорпорация):</b>", style_td),
-            Paragraph("105 000 тенге/т (3 класс, клейковина 25%+)", style_td),
+            Paragraph("<b>Источник погоды:</b>", style_td),
+            Paragraph(str(weather.get("source") or "Нет данных"), style_td),
+            Paragraph("<b>Качество модели:</b>", style_td),
+            Paragraph(str(forecast_data.get("modelQuality") or forecast_data.get("message") or "Нет данных"), style_td),
         ],
     ]
     t_agro = Table(agro_data, colWidths=[130, 140, 120, 133])
@@ -703,25 +654,31 @@ def generate_agropassport_pdf(
     story.append(t_agro)
     story.append(Spacer(1, 6))
 
-    # 7. Блок VI: Фитосанитарный мониторинг и очаги неоднородности
-    story.append(Paragraph("РАЗДЕЛ VI. ФИТОСАНИТАРНЫЙ СТАТУС И ОЧАГИ РИСКА", style_h2))
+    # 7. Блок VI: спектральная неоднородность, не диагноз заболевания
+    story.append(Paragraph("РАЗДЕЛ VI. СПЕКТРАЛЬНЫЕ ЗОНЫ РИСКА", style_h2))
 
     zones_list = zones.get("zones", [])
     zones_cnt = len(zones_list)
 
     if zones_cnt == 0:
         phyto_text = (
-            "По результатам сканирования пиксельной сетки Sentinel-2 значимых очагов депрессии вегетации "
-            "не выявлено. Биомасса распределена однородно, признаки вспышек листовых ржавчин, септориоза или сорной "
-            "инвазии в масштабах поля отсутствуют. Рекомендован стандартный плановый мониторинг."
+            "По доступной пиксельной сетке Sentinel-2 значимые зоны спектральной неоднородности не выделены. "
+            "Это не исключает болезни, вредителей или сорняки: спутниковые индексы не устанавливают причину без осмотра."
         )
     else:
         top_zone = zones_list[0]
+        suspect_area = zones.get("totalSuspectAreaHa")
+        zone_area = top_zone.get("areaHa")
+        ndvi_deficit = top_zone.get("ndviDeficit")
+        suspect_area_text = f"{suspect_area:.1f} га" if isinstance(suspect_area, (int, float)) else "площадь не рассчитана"
+        zone_area_text = f"{zone_area:.1f} га" if isinstance(zone_area, (int, float)) else "площадь не рассчитана"
+        deficit_text = f"{ndvi_deficit:.2f}" if isinstance(ndvi_deficit, (int, float)) else "нет данных"
         phyto_text = (
             f"Выявлено {zones_cnt} локальных очага неоднородности развития биомассы общей площадью "
-            f"{zones.get('totalSuspectAreaHa', 0.0):.1f} га. Приоритетный очаг: {top_zone.get('title', 'Очаг №1')} "
-            f"({top_zone.get('areaHa', 0.0):.1f} га, ΔNDVI = {top_zone.get('ndviDeficit', 0.0):.2f}). "
-            f"Фактор: {top_zone.get('mainFactor', 'дефицит влаги')}. Рекомендация: {top_zone.get('recommendation', 'контрольный осмотр')}."
+            f"{suspect_area_text}. Приоритетный очаг: {top_zone.get('title') or 'Без названия'} "
+            f"({zone_area_text}, ΔNDVI = {deficit_text}). "
+            f"Фактор: {top_zone.get('mainFactor') or 'не определён'}. "
+            f"Рекомендация: {top_zone.get('recommendation') or 'выполнить контрольный осмотр'}."
         )
 
     t_phyto = Table([[Paragraph(phyto_text, style_legal)]], colWidths=[523])
@@ -733,35 +690,20 @@ def generate_agropassport_pdf(
     story.append(t_phyto)
     story.append(Spacer(1, 8))
 
-    # 8. Блок VII: ЭЦП, валидационный штемпель и верификационный QR-код
-    story.append(Paragraph("РАЗДЕЛ VII. ЦИФРОВАЯ ПОДПИСЬ, ВЕРИФИКАЦИЯ И РЕКВИЗИТЫ", style_h2))
-
-    # Формируем контрольный SHA-256 хеш документа
-    doc_hash = hashlib.sha256(f"{reg_number}_{field_name}_{area_ha}_{doc_date}".encode()).hexdigest().upper()
-
-    # Генерируем реальный QR-код через ReportLab
-    verify_url = f"https://tanap.ai/verify/{reg_number}?h={doc_hash[:16]}"
-    qr_widget = QrCodeWidget(verify_url)
-    qr_widget.barWidth = 54
-    qr_widget.barHeight = 54
-    qr_drawing = Drawing(54, 54)
-    qr_drawing.add(qr_widget)
-
-    stamp_text = (
-        "<b>ЭЛЕКТРОННЫЙ АГРОПАСПОРТ · ВАЛИДИРОВАН СПУТНИКОВОЙ СИСТЕМОЙ TANAP AI</b><br/>"
-        f"<b>Регистрационный сертификат:</b> KZ-TANAP-2026-V8-AKM-{field.get('id', '0')[:6].upper()}<br/>"
-        f"<b>Контрольная сумма SHA-256:</b> <font face='Courier' size='6'>{doc_hash[:32]}...{doc_hash[-16:]}</font><br/>"
-        "<b>Соответствие требованиям:</b> АО «Аграрная кредитная корпорация» (АКК), МСХ РК, СТ РК ИСО/МЭК<br/>"
-        f"<i>Сформировано автоматически: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} · Подписано ЭЦП геоаналитика</i>"
+    # 8. Блок VII: происхождение и ограничения данных
+    story.append(Paragraph("РАЗДЕЛ VII. ИСТОЧНИКИ И ОГРАНИЧЕНИЯ", style_h2))
+    source_text = (
+        f"<b>ID отчёта:</b> {report_id}<br/>"
+        f"<b>Спутниковые данные:</b> {satellite.get('source') or 'Нет данных'}<br/>"
+        f"<b>Погодные данные:</b> {weather.get('source') or 'Нет данных'}<br/>"
+        f"<b>Сформировано:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}<br/>"
+        "<i>Площадь и периметр вычислены по сохранённому пользовательскому контуру. Документ не содержит "
+        "кадастровой проверки, электронной цифровой подписи или подтверждения государственных органов. "
+        "Спутниковые и модельные результаты требуют полевой верификации.</i>"
     )
 
-    cert_box = [
-        [
-            qr_drawing,
-            Paragraph(stamp_text, style_legal),
-        ]
-    ]
-    t_cert = Table(cert_box, colWidths=[65, 458])
+    cert_box = [[Paragraph(source_text, style_legal)]]
+    t_cert = Table(cert_box, colWidths=[523])
     t_cert.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8F9FA")),
         ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#1B5E20")),

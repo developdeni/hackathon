@@ -1,29 +1,18 @@
-<!DOCTYPE html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8" />
-    <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, shrink-to-fit=no, viewport-fit=cover" />
-    <title>Tanap AI</title>
-    <!-- The `react-native-web` recommended style reset: https://necolas.github.io/react-native-web/docs/setup/#root-element -->
-    <style id="expo-reset">
-      /* These styles make the body full-height */
-      html,
-      body {
-        height: 100%;
-      }
-      /* These styles disable body scrolling if you are using <ScrollView> */
-      body {
-        overflow: hidden;
-      }
-      /* These styles make the root element full-height */
-      #root {
-        display: flex;
-        height: 100%;
-        flex: 1;
-      }
-    </style>
-  <link rel="icon" href="/favicon.ico"/>    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+// Post-processes the Expo web export (SPA `output`) for the Telegram Mini App and
+// copies it into the FastAPI static dir. `+html.tsx` is ignored for SPA output,
+// so the Mini App head (zoom lock, Telegram SDK, gesture blocking) is injected here.
+//
+// Run automatically by `npm run build:tma`.
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MOBILE = path.resolve(__dirname, '..');
+const DIST = path.join(MOBILE, 'dist');
+const TARGET = path.resolve(MOBILE, '..', 'backend', 'app', 'static', 'dist');
+
+const INJECT = `    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style id="tanap-tma-reset">
       html, body, #root { background-color: #F2F2F7; }
       html, body { touch-action: manipulation; }
@@ -64,15 +53,31 @@
       }, { passive: false });
     })();
     </script>
-  </head>
+`;
 
-  <body>
-    <!-- Use static rendering with Expo Router to support running without JavaScript. -->
-    <noscript>
-      You need to enable JavaScript to run this app.
-    </noscript>
-    <!-- The root element for your Expo app. -->
-    <div id="root"></div>
-  <script src="/_expo/static/js/web/entry-3d0c8cfbdca880024393cdce0a3f0969.js" defer></script>
-</body>
-</html>
+async function main() {
+  const indexPath = path.join(DIST, 'index.html');
+  let html = await fs.readFile(indexPath, 'utf8');
+
+  html = html.replace(
+    /<meta name="viewport"[^>]*>/,
+    '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, shrink-to-fit=no, viewport-fit=cover" />',
+  );
+  html = html.replace('<html lang="en">', '<html lang="ru">');
+
+  if (!html.includes('tanap-tma-reset')) {
+    html = html.replace('</head>', `${INJECT}  </head>`);
+  }
+  await fs.writeFile(indexPath, html);
+
+  // Sync dist -> backend static dir.
+  await fs.rm(TARGET, { recursive: true, force: true });
+  await fs.cp(DIST, TARGET, { recursive: true });
+
+  console.log('[inject-tma] done ->', TARGET);
+}
+
+main().catch((err) => {
+  console.error('[inject-tma] failed:', err);
+  process.exit(1);
+});

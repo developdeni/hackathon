@@ -155,10 +155,9 @@ export function registerUser(input: RegisterInput) {
 }
 
 export function telegramAuthUser(input: {
-  telegramId: number | string;
+  initData: string;
   name: string;
   companyName: string;
-  username?: string | null;
 }) {
   return apiFetch<AuthResponse>('/api/auth/telegram-webapp', {
     method: 'POST',
@@ -169,6 +168,13 @@ export function telegramAuthUser(input: {
 
 export function getMe() {
   return apiFetch<User>('/api/auth/me');
+}
+
+export function getTelegramLinkCode() {
+  return apiFetch<{ code: string; deepLink: string; botUsername: string }>(
+    '/api/auth/telegram-link-code',
+    { method: 'POST' },
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { AuthProvider } from '../src/contexts/AuthContext';
+import { LanguageProvider } from '../src/i18n';
 import { BroldSplashIntro } from '../src/components/BroldSplashIntro';
 
 export default function RootLayout() {
@@ -33,6 +34,7 @@ export default function RootLayout() {
   }
 
   return (
+    <LanguageProvider>
     <AuthProvider>
       <StatusBar style="dark" />
       <Stack
@@ -86,5 +88,6 @@ export default function RootLayout() {
 
       {showSplash && <BroldSplashIntro onFinish={() => setShowSplash(false)} />}
     </AuthProvider>
+    </LanguageProvider>
   );
 }

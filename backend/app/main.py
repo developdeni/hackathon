@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import asyncio
 import csv
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
+import secrets
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -44,6 +46,7 @@ from .weather import get_field_agro_weather
 from .climate_risk import get_field_climate_risk
 from .yield_forecast import get_yield_forecast
 from .field_operations import build_operations_recommendation, fetch_operations_weather
+from .telegram_auth import validate_telegram_init_data
 from starlette.concurrency import run_in_threadpool
 
 from .ai_advisor import (
@@ -82,10 +85,15 @@ class LoginInput(BaseModel):
 
 
 class TelegramAuthInput(BaseModel):
-    telegramId: int | str
+    initData: str = PydanticField(min_length=1, max_length=16_384)
     name: str = PydanticField(min_length=1, max_length=120)
     companyName: str = PydanticField(min_length=1, max_length=120)
-    username: str | None = None
+
+
+class TelegramLinkConfirmInput(BaseModel):
+    code: str = PydanticField(min_length=4, max_length=64)
+    telegramId: int | str
+    telegramName: str | None = None
 
 
 class CreateProfileInput(BaseModel):
@@ -479,15 +487,29 @@ def login(payload: LoginInput) -> dict:
 
 @app.post("/api/auth/telegram-webapp")
 def telegram_webapp_auth(payload: TelegramAuthInput) -> dict:
-    tg_id_str = str(payload.telegramId).strip()
-    if not tg_id_str:
-        raise HTTPException(status_code=400, detail="telegramId обязателен")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="Telegram-авторизация не настроена")
+    try:
+        telegram_user = validate_telegram_init_data(payload.initData, bot_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    tg_id_str = str(telegram_user["id"])
 
     email = f"tg_{tg_id_str}@telegram.tanap.ai"
     user_id = f"user-tg-{tg_id_str}"
     now = datetime.now(timezone.utc).isoformat()
 
     with connect() as connection:
+        # If this Telegram id was linked to an existing app account, log into THAT.
+        linked_row = connection.execute(
+            "SELECT * FROM users WHERE telegram_id = ?", (tg_id_str,)
+        ).fetchone()
+        if linked_row is not None:
+            token = create_access_token(linked_row["id"])
+            return {"token": token, "user": user_from_row(linked_row)}
+
         user_row = connection.execute(
             "SELECT * FROM users WHERE email = ? OR id = ?", (email, user_id)
         ).fetchone()
@@ -566,6 +588,91 @@ def telegram_webapp_auth(payload: TelegramAuthInput) -> dict:
 
     token = create_access_token(user_row["id"])
     return {"token": token, "user": user_from_row(user_row)}
+
+
+BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "tanapai_aqmola_bot")
+
+
+@app.post("/api/auth/telegram-link-code")
+def create_telegram_link_code(user_id: str = Depends(require_user)) -> dict:
+    """Issue a one-time code that binds the caller's app account to a Telegram user."""
+    code = secrets.token_hex(8)  # 16 hex chars
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as connection:
+        connection.execute("DELETE FROM telegram_link_codes WHERE user_id = ?", (user_id,))
+        connection.execute(
+            "INSERT INTO telegram_link_codes (code, user_id, created_at) VALUES (?, ?, ?)",
+            (code, user_id, now),
+        )
+    return {
+        "code": code,
+        "deepLink": f"https://t.me/{BOT_USERNAME}?start=link{code}",
+        "botUsername": BOT_USERNAME,
+    }
+
+
+@app.post("/api/auth/telegram-link-confirm")
+def confirm_telegram_link(payload: TelegramLinkConfirmInput) -> dict:
+    """Called by the bot when it receives `/start link<code>`; binds/merges accounts."""
+    code = payload.code.strip()
+    tg_id_str = str(payload.telegramId).strip()
+    if not code or not tg_id_str:
+        raise HTTPException(status_code=400, detail="code и telegramId обязательны")
+
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM telegram_link_codes WHERE code = ?", (code,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Код недействителен или уже использован")
+
+        try:
+            created = datetime.fromisoformat(row["created_at"])
+            if datetime.now(timezone.utc) - created > timedelta(minutes=15):
+                connection.execute("DELETE FROM telegram_link_codes WHERE code = ?", (code,))
+                raise HTTPException(status_code=410, detail="Код истёк, сгенерируйте новый")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+        app_user_id = row["user_id"]
+        app_user = connection.execute(
+            "SELECT * FROM users WHERE id = ?", (app_user_id,)
+        ).fetchone()
+        if app_user is None:
+            connection.execute("DELETE FROM telegram_link_codes WHERE code = ?", (code,))
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+
+        # Detach this Telegram id from any other account it may have been on.
+        connection.execute(
+            "UPDATE users SET telegram_id = NULL WHERE telegram_id = ? AND id != ?",
+            (tg_id_str, app_user_id),
+        )
+
+        # Merge a prior Telegram-only account (from webapp login) into the app account.
+        tg_account_id = f"user-tg-{tg_id_str}"
+        merged = False
+        if tg_account_id != app_user_id:
+            tg_account = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (tg_account_id,)
+            ).fetchone()
+            if tg_account is not None:
+                connection.execute(
+                    "UPDATE profiles SET user_id = ? WHERE user_id = ?", (app_user_id, tg_account_id)
+                )
+                connection.execute(
+                    "UPDATE fields SET user_id = ? WHERE user_id = ?", (app_user_id, tg_account_id)
+                )
+                connection.execute("DELETE FROM users WHERE id = ?", (tg_account_id,))
+                merged = True
+
+        connection.execute(
+            "UPDATE users SET telegram_id = ? WHERE id = ?", (tg_id_str, app_user_id)
+        )
+        connection.execute("DELETE FROM telegram_link_codes WHERE code = ?", (code,))
+
+    return {"ok": True, "name": app_user["name"], "merged": merged}
 
 
 @app.get("/api/auth/me")
@@ -1222,10 +1329,12 @@ async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) 
         ).fetchall()
         user_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         profile_row = connection.execute(
-            "SELECT * FROM profiles WHERE id = ?", (field.get("profile_id"),)
+            "SELECT * FROM profiles WHERE id = ? AND user_id = ?",
+            (field.get("profileId"), user_id),
         ).fetchone()
 
     yield_history = [yield_history_from_row(item) for item in history_rows]
+    forecast = await get_yield_forecast(field, yield_history)
     user_dict = dict(user_row) if user_row else None
     profile_dict = dict(profile_row) if profile_row else None
 
@@ -1236,6 +1345,7 @@ async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) 
         weather=weather,
         classification=classification,
         yield_history=yield_history,
+        yield_forecast=forecast,
         user=user_dict,
         farm_profile=profile_dict,
     )
@@ -1583,5 +1693,3 @@ def serve_spa_fallback(full_path: str):
     if index_file.is_file():
         return FileResponse(index_file)
     raise HTTPException(status_code=404, detail="Not found")
-
-

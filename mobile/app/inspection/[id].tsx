@@ -140,7 +140,7 @@ export default function InspectionScreen() {
       <View style={styles.verificationBox}>
         <Text style={styles.verificationTitle}>Верификация наземного обследования</Text>
         <Text style={styles.verificationText}>
-          Фотоматериал привязан к кадастровому контуру поля для подтверждения спутниковых аномалий Sentinel-2 L2A.
+          Фотоматериал привязан к сохранённому контуру поля для проверки спутниковых аномалий Sentinel-2 L2A.
         </Text>
       </View>
     </Screen>

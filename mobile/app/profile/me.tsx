@@ -5,11 +5,13 @@ import { Avatar } from '../../src/components/Avatar';
 import { Card } from '../../src/components/Card';
 import { Screen } from '../../src/components/Screen';
 import { useAuth } from '../../src/contexts/AuthContext';
+import { useI18n, type Lang } from '../../src/i18n';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
 
 export default function MyProfileScreen() {
   const { user, logout, refreshUser, isLoading } = useAuth();
+  const { t, lang, setLang } = useI18n();
 
   useEffect(() => {
     void refreshUser();
@@ -42,25 +44,33 @@ export default function MyProfileScreen() {
       {/* Stats row */}
       {stats ? (
         <Card style={styles.statsCard}>
-          <StatCell value={stats.fieldCount} label="участков" />
-          <StatCell value={stats.totalAreaHa % 1 === 0 ? stats.totalAreaHa : Number(stats.totalAreaHa.toFixed(1))} label="га" />
-          <StatCell value={stats.inspectionCount} label="осмотров" />
-          <StatCell value={stats.profileCount} label="профилей" />
+          <StatCell value={stats.fieldCount} label={t('profile.stat.fields')} />
+          <StatCell value={stats.totalAreaHa % 1 === 0 ? stats.totalAreaHa : Number(stats.totalAreaHa.toFixed(1))} label={t('profile.stat.ha')} />
+          <StatCell value={stats.inspectionCount} label={t('profile.stat.inspections')} />
+          <StatCell value={stats.profileCount} label={t('profile.stat.profiles')} />
         </Card>
       ) : null}
 
+      {/* Language selector */}
+      <Text style={styles.sectionText}>{t('profile.language')}</Text>
+      <Card style={styles.langCard}>
+        <LangOption code="ru" label={t('lang.ru')} active={lang === 'ru'} onPress={setLang} />
+        <View style={styles.rowDivider} />
+        <LangOption code="kk" label={t('lang.kk')} active={lang === 'kk'} onPress={setLang} />
+      </Card>
+
       {/* Account info */}
-      <Text style={styles.sectionText}>АККАУНТ</Text>
+      <Text style={styles.sectionText}>{t('profile.account')}</Text>
       <Card style={styles.infoCard}>
-        <InfoRow label="Email" value={user.email} />
+        <InfoRow label={t('profile.email')} value={user.email} />
         <View style={styles.rowDivider} />
-        <InfoRow label="Организация" value={user.organization || '—'} />
+        <InfoRow label={t('profile.org')} value={user.organization || '—'} />
         <View style={styles.rowDivider} />
-        <InfoRow label="Регион" value={user.region || '—'} />
+        <InfoRow label={t('profile.region')} value={user.region || '—'} />
         <View style={styles.rowDivider} />
         <InfoRow
-          label="Дата регистрации"
-          value={new Date(user.createdAt).toLocaleDateString('ru-RU', {
+          label={t('profile.registered')}
+          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : 'ru-RU', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',
@@ -73,7 +83,7 @@ export default function MyProfileScreen() {
         onPress={() => void logout()}
         style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]}
       >
-        <Text style={styles.logoutText}>Выйти из аккаунта</Text>
+        <Text style={styles.logoutText}>{t('profile.logout')}</Text>
       </Pressable>
     </Screen>
   );
@@ -94,6 +104,28 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <Text style={styles.infoLabel}>{label}</Text>
       <Text style={styles.infoValue}>{value}</Text>
     </View>
+  );
+}
+
+function LangOption({
+  code,
+  label,
+  active,
+  onPress,
+}: {
+  code: Lang;
+  label: string;
+  active: boolean;
+  onPress: (next: Lang) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => onPress(code)}
+      style={({ pressed }) => [styles.langRow, pressed && styles.pressed]}
+    >
+      <Text style={[styles.langLabel, active && styles.langLabelActive]}>{label}</Text>
+      {active ? <Text style={styles.langCheck}>✓</Text> : null}
+    </Pressable>
   );
 }
 
@@ -169,6 +201,32 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     paddingHorizontal: 4,
     textTransform: 'uppercase',
+  },
+
+  // Language card
+  langCard: {
+    padding: 0,
+  },
+  langRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    minHeight: 50,
+  },
+  langLabel: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 15,
+    color: colors.text,
+  },
+  langLabelActive: {
+    fontFamily: fontFamilies.semiBold,
+    color: colors.primary,
+  },
+  langCheck: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: colors.primary,
   },
 
   // Info card

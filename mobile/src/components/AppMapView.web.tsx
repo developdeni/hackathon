@@ -1,5 +1,11 @@
-import React, { forwardRef, useImperativeHandle, useMemo, useState } from 'react';
-import { View, StyleSheet, Text, Pressable } from 'react-native';
+import React, {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+} from 'react';
+import { View, StyleSheet } from 'react-native';
 
 export type Region = {
   latitude: number;
@@ -9,12 +15,7 @@ export type Region = {
 };
 
 export type MapPressEvent = {
-  nativeEvent: {
-    coordinate: {
-      latitude: number;
-      longitude: number;
-    };
-  };
+  nativeEvent: { coordinate: { latitude: number; longitude: number } };
 };
 
 export type AppMapViewProps = {
@@ -25,6 +26,7 @@ export type AppMapViewProps = {
   onRegionChangeComplete?: (region: Region) => void;
   onPress?: (event: MapPressEvent) => void;
   children?: React.ReactNode;
+  [key: string]: any;
 };
 
 export type MarkerProps = {
@@ -32,7 +34,13 @@ export type MarkerProps = {
   title?: string;
   description?: string;
   pinColor?: string;
+  draggable?: boolean;
+  label?: string | number;
+  onPress?: (event: any) => void;
+  onDragStart?: (event?: any) => void;
+  onDragEnd?: (event: any) => void;
   children?: React.ReactNode;
+  [key: string]: any;
 };
 
 export type PolygonProps = {
@@ -40,205 +48,199 @@ export type PolygonProps = {
   fillColor?: string;
   strokeColor?: string;
   strokeWidth?: number;
+  onPress?: () => void;
+  [key: string]: any;
 };
 
+// These render nothing on web — AppMapView reads their props from children.
 export function Marker(_props: MarkerProps) {
   return null;
 }
-
 export function Polygon(_props: PolygonProps) {
   return null;
 }
-
 export function Callout(_props: any) {
   return null;
 }
 
+// --- Leaflet loader (from cdnjs, once) --------------------------------------
+let leafletPromise: Promise<any> | null = null;
+function loadLeaflet(): Promise<any> {
+  if (typeof window === 'undefined') return Promise.reject(new Error('no window'));
+  if ((window as any).L) return Promise.resolve((window as any).L);
+  if (leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve, reject) => {
+    const cssId = 'leaflet-css';
+    if (!document.getElementById(cssId)) {
+      const css = document.createElement('link');
+      css.id = cssId;
+      css.rel = 'stylesheet';
+      css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+      document.head.appendChild(css);
+    }
+    const js = document.createElement('script');
+    js.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    js.async = true;
+    js.onload = () => resolve((window as any).L);
+    js.onerror = () => reject(new Error('leaflet load failed'));
+    document.head.appendChild(js);
+  });
+  return leafletPromise;
+}
+
+function zoomForDelta(latDelta: number): number {
+  const z = Math.log2(360 / Math.max(latDelta || 0.05, 0.0006));
+  return Math.max(3, Math.min(18, Math.round(z)));
+}
+
 const AppMapView = forwardRef<any, AppMapViewProps>(function AppMapView(props, ref) {
   const { style, initialRegion, region: controlledRegion, onPress, children } = props;
-  const currentRegion = controlledRegion || initialRegion || {
-    latitude: 51.62,
-    longitude: 70.18,
-    latitudeDelta: 0.05,
-    longitudeDelta: 0.05,
-  };
 
-  const [region, setRegion] = useState<Region>(currentRegion);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const overlayRef = useRef<any>(null);
+  const onPressRef = useRef(onPress);
+  onPressRef.current = onPress;
 
-  useImperativeHandle(ref, () => ({
-    animateToRegion: (nextRegion: Region) => {
-      setRegion(nextRegion);
-      props.onRegionChangeComplete?.(nextRegion);
-    },
-  }));
+  const region0 = controlledRegion ||
+    initialRegion || {
+      latitude: 51.62,
+      longitude: 70.18,
+      latitudeDelta: 0.05,
+      longitudeDelta: 0.05,
+    };
 
-  // Parse children to find Polygons and Markers
+  // Parse child <Polygon>/<Marker> into plain prop objects.
   const { polygons, markers } = useMemo(() => {
     const polys: PolygonProps[] = [];
     const marks: MarkerProps[] = [];
-
     React.Children.forEach(children, (child) => {
       if (!React.isValidElement(child)) return;
-      if (child.type === Polygon) {
-        polys.push(child.props as PolygonProps);
-      } else if (child.type === Marker) {
-        marks.push(child.props as MarkerProps);
-      }
+      if (child.type === Polygon) polys.push(child.props as PolygonProps);
+      else if (child.type === Marker) marks.push(child.props as MarkerProps);
     });
-
     return { polygons: polys, markers: marks };
   }, [children]);
 
-  // Project lat/lng to [0..100]% within current region bounding box
-  const minLat = region.latitude - region.latitudeDelta / 2;
-  const maxLat = region.latitude + region.latitudeDelta / 2;
-  const minLng = region.longitude - region.longitudeDelta / 2;
-  const maxLng = region.longitude + region.longitudeDelta / 2;
+  const drawOverlays = (L: any) => {
+    const group = overlayRef.current;
+    if (!group) return;
+    group.clearLayers();
 
-  const latToY = (lat: number) => {
-    const range = maxLat - minLat || 0.001;
-    return ((maxLat - lat) / range) * 100;
-  };
+    polygons.forEach((p) => {
+      if (!p.coordinates || p.coordinates.length < 3) return;
+      const latlngs = p.coordinates.map((c) => [c.latitude, c.longitude]);
+      const poly = L.polygon(latlngs, {
+        color: p.strokeColor || '#10B981',
+        weight: p.strokeWidth || 2,
+        fillColor: p.fillColor || '#10B981',
+        fillOpacity: 0.28,
+      }).addTo(group);
+      if (p.onPress) poly.on('click', () => p.onPress?.());
+    });
 
-  const lngToX = (lng: number) => {
-    const range = maxLng - minLng || 0.001;
-    return ((lng - minLng) / range) * 100;
-  };
-
-  const handleContainerPress = (e: any) => {
-    if (!onPress) return;
-    const rect = e.currentTarget?.getBoundingClientRect?.();
-    if (!rect) return;
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
-    const normX = Math.max(0, Math.min(1, clickX / rect.width));
-    const normY = Math.max(0, Math.min(1, clickY / rect.height));
-
-    const clickedLng = minLng + normX * (maxLng - minLng);
-    const clickedLat = maxLat - normY * (maxLat - minLat);
-
-    onPress({
-      nativeEvent: {
-        coordinate: {
-          latitude: clickedLat,
-          longitude: clickedLng,
-        },
-      },
+    markers.forEach((m) => {
+      const pos: [number, number] = [m.coordinate.latitude, m.coordinate.longitude];
+      const isVertex = m.label != null || m.draggable;
+      if (isVertex) {
+        const html = `<div style="width:26px;height:26px;border-radius:50%;background:${
+          m.pinColor || '#1B5E20'
+        };border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif;">${
+          m.label != null ? String(m.label) : ''
+        }</div>`;
+        const icon = L.divIcon({ html, className: '', iconSize: [26, 26], iconAnchor: [13, 13] });
+        const mk = L.marker(pos, { icon, draggable: !!m.draggable }).addTo(group);
+        if (m.onPress) {
+          mk.on('click', (e: any) => {
+            if (L.DomEvent) L.DomEvent.stopPropagation(e);
+            m.onPress?.({ stopPropagation() {}, nativeEvent: { coordinate: { latitude: pos[0], longitude: pos[1] } } });
+          });
+        }
+        if (m.onDragStart) mk.on('dragstart', () => m.onDragStart?.());
+        if (m.onDragEnd) {
+          mk.on('dragend', (e: any) => {
+            const ll = e.target.getLatLng();
+            m.onDragEnd?.({ nativeEvent: { coordinate: { latitude: ll.lat, longitude: ll.lng } } });
+          });
+        }
+      } else {
+        const html = `<div style="display:flex;flex-direction:column;align-items:center;transform:translateY(-6px);">
+          <div style="width:14px;height:14px;border-radius:50%;background:${m.pinColor || '#EF4444'};border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);"></div>
+          ${m.title ? `<span style="margin-top:2px;padding:1px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;font-family:Montserrat,sans-serif;white-space:nowrap;">${m.title}</span>` : ''}
+        </div>`;
+        const icon = L.divIcon({ html, className: '', iconSize: [14, 26], iconAnchor: [7, 13] });
+        L.marker(pos, { icon, interactive: false }).addTo(group);
+      }
     });
   };
 
+  // Initialise the Leaflet map once.
+  useEffect(() => {
+    let cancelled = false;
+    loadLeaflet()
+      .then((L) => {
+        if (cancelled || !containerRef.current || mapRef.current) return;
+        const map = L.map(containerRef.current, {
+          zoomControl: true,
+          attributionControl: true,
+          tap: true,
+        }).setView([region0.latitude, region0.longitude], zoomForDelta(region0.latitudeDelta));
+
+        L.tileLayer(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          { maxZoom: 19, attribution: 'Esri · Maxar · Earthstar Geographics' },
+        ).addTo(map);
+
+        overlayRef.current = L.layerGroup().addTo(map);
+        map.on('click', (e: any) => {
+          onPressRef.current?.({
+            nativeEvent: { coordinate: { latitude: e.latlng.lat, longitude: e.latlng.lng } },
+          });
+        });
+        mapRef.current = map;
+        drawOverlays(L);
+        setTimeout(() => map.invalidateSize(), 60);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        overlayRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Redraw overlays whenever polygons/markers change.
+  useEffect(() => {
+    const L = (window as any).L;
+    if (L && mapRef.current && overlayRef.current) drawOverlays(L);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polygons, markers]);
+
+  useImperativeHandle(ref, () => ({
+    animateToRegion: (nextRegion: Region) => {
+      mapRef.current?.setView(
+        [nextRegion.latitude, nextRegion.longitude],
+        zoomForDelta(nextRegion.latitudeDelta),
+      );
+    },
+    fitToCoordinates: (
+      coordinates: Array<{ latitude: number; longitude: number }>,
+      _options?: unknown,
+    ) => {
+      const L = (window as any).L;
+      if (!L || !mapRef.current || !coordinates?.length) return;
+      const bounds = L.latLngBounds(coordinates.map((c) => [c.latitude, c.longitude]));
+      mapRef.current.fitBounds(bounds, { padding: [28, 28], maxZoom: 17 });
+    },
+  }));
+
   return (
     <View style={[styles.container, style]}>
-      {/* Interactive SVG Field Canvas */}
-      <div
-        onClick={handleContainerPress}
-        style={{
-          width: '100%',
-          height: '100%',
-          position: 'relative',
-          backgroundColor: '#131D15',
-          backgroundImage: `
-            radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.08) 0%, transparent 80%),
-            linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)
-          `,
-          backgroundSize: '100% 100%, 24px 24px, 24px 24px',
-          overflow: 'hidden',
-          cursor: onPress ? 'crosshair' : 'default',
-        }}
-      >
-        <svg
-          style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-        >
-          {/* Polygons */}
-          {polygons.map((poly, idx) => {
-            if (!poly.coordinates || poly.coordinates.length < 3) return null;
-            const points = poly.coordinates
-              .map((c) => `${lngToX(c.longitude)},${latToY(c.latitude)}`)
-              .join(' ');
-            return (
-              <polygon
-                key={idx}
-                points={points}
-                fill={poly.fillColor || 'rgba(16, 185, 129, 0.35)'}
-                stroke={poly.strokeColor || '#10B981'}
-                strokeWidth={poly.strokeWidth ? poly.strokeWidth * 0.4 : 0.8}
-                strokeLinejoin="round"
-              />
-            );
-          })}
-        </svg>
-
-        {/* Markers */}
-        {markers.map((marker, idx) => {
-          const x = lngToX(marker.coordinate.longitude);
-          const y = latToY(marker.coordinate.latitude);
-          return (
-            <div
-              key={idx}
-              style={{
-                position: 'absolute',
-                left: `${x}%`,
-                top: `${y}%`,
-                transform: 'translate(-50%, -100%)',
-                pointerEvents: 'none',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-              }}
-            >
-              <div
-                style={{
-                  background: marker.pinColor || '#EF4444',
-                  width: '12px',
-                  height: '12px',
-                  borderRadius: '50%',
-                  border: '2px solid #FFFFFF',
-                  boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
-                }}
-              />
-              {marker.title && (
-                <span
-                  style={{
-                    color: '#FFFFFF',
-                    fontSize: '10px',
-                    fontFamily: 'Montserrat, sans-serif',
-                    background: 'rgba(0,0,0,0.7)',
-                    padding: '1px 4px',
-                    borderRadius: '4px',
-                    marginTop: '2px',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {marker.title}
-                </span>
-              )}
-            </div>
-          );
-        })}
-
-        {/* Web Satellite Overlay Badge */}
-        <div
-          style={{
-            position: 'absolute',
-            bottom: '8px',
-            right: '8px',
-            background: 'rgba(7, 8, 11, 0.75)',
-            backdropFilter: 'blur(8px)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            borderRadius: '6px',
-            padding: '4px 8px',
-            fontSize: '10px',
-            color: '#9CA3AF',
-            fontFamily: 'Montserrat, sans-serif',
-            pointerEvents: 'none',
-          }}
-        >
-          🛰 Sentinel-2 L2A Web View
-        </div>
-      </div>
+      <div ref={containerRef} style={{ width: '100%', height: '100%', background: '#0F172A' }} />
     </View>
   );
 });

@@ -11,10 +11,9 @@ import {
 import { LoginInput, RegisterInput, User } from '../types/domain';
 
 type TelegramAuthInput = {
-  telegramId: number | string;
+  initData: string;
   name: string;
   companyName: string;
-  username?: string | null;
 };
 
 type AuthContextValue = {

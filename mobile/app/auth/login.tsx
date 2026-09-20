@@ -46,6 +46,13 @@ export default function LoginScreen() {
 
   async function handleTelegramLogin() {
     if (!tgUser) return;
+    const initData = typeof window !== 'undefined'
+      ? (window as any).Telegram?.WebApp?.initData
+      : '';
+    if (!initData) {
+      setError('Не удалось подтвердить запуск из Telegram. Откройте Mini App заново.');
+      return;
+    }
     const finalName = tgName.trim();
     const finalCompany = companyName.trim();
     if (!finalName) { setError('Введите ваше имя'); return; }
@@ -58,10 +65,9 @@ export default function LoginScreen() {
         (window as any).Telegram.WebApp.HapticFeedback.notificationOccurred('success');
       }
       await loginWithTelegram({
-        telegramId: tgUser.id,
+        initData,
         name: finalName,
         companyName: finalCompany,
-        username: tgUser.username,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось войти через Telegram');

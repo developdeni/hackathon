@@ -6,6 +6,7 @@ import {
   FlatList,
   Image,
   Keyboard,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -44,8 +45,11 @@ import {
   clearAiChatHistory,
   getAiFarmSummary,
   cleanAiText,
+  getTelegramLinkCode,
 } from '../src/services/api';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
+import { notify, confirmDestructive } from '../src/utils/notify';
+import { useI18n } from '../src/i18n';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage, AiFarmSummary, AiFieldBadge } from '../src/types/domain';
@@ -139,6 +143,7 @@ function TypingDots() {
 export default function MainScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { t } = useI18n();
   const { user, logout, refreshUser, isLoading: isAuthLoading } = useAuth();
   const params = useLocalSearchParams<{
     profileId?: string;
@@ -440,19 +445,10 @@ export default function MainScreen() {
   }
 
   function confirmDelete(field: Field) {
-    Alert.alert(
+    confirmDestructive(
       'Удалить участок?',
       `Участок «${field.name}» и его осмотры будут удалены.`,
-      [
-        { text: 'Отмена', style: 'cancel' },
-        {
-          text: 'Удалить',
-          style: 'destructive',
-          onPress: () => {
-            void removeField(field.id);
-          },
-        },
-      ]
+      () => void removeField(field.id),
     );
   }
 
@@ -461,7 +457,7 @@ export default function MainScreen() {
       await deleteField(fieldId);
       setFields((current) => current.filter((field) => field.id !== fieldId));
     } catch (nextError) {
-      Alert.alert('Не удалось удалить', nextError instanceof Error ? nextError.message : 'Повторите попытку.');
+      notify('Не удалось удалить', nextError instanceof Error ? nextError.message : 'Повторите попытку.');
     }
   }
 
@@ -539,7 +535,7 @@ export default function MainScreen() {
               activeTab === 'ai_tools' && styles.tabLabelActive,
             ]}
           >
-            AI Tools
+            {t('nav.ai')}
           </Text>
         </Pressable>
 
@@ -558,7 +554,7 @@ export default function MainScreen() {
               activeTab === 'fields' && styles.tabLabelActive,
             ]}
           >
-            Участки
+            {t('nav.fields')}
           </Text>
         </Pressable>
 
@@ -577,7 +573,7 @@ export default function MainScreen() {
               activeTab === 'profile' && styles.tabLabelActive,
             ]}
           >
-            Профиль
+            {t('nav.profile')}
           </Text>
         </Pressable>
       </View>
@@ -696,6 +692,7 @@ function AiToolsView({
   targetField?: Field | null;
   onClearTargetField?: () => void;
 }) {
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const [viewMode, setViewMode] = useState<AiViewMode>('menu');
 
@@ -1298,8 +1295,8 @@ function AiToolsView({
             <Text style={{ fontSize: 24 }}>🌱</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.aiMenuTitle}>AI Tools</Text>
-            <Text style={styles.aiMenuSubtitle}>Помощник агронома Tanap AI</Text>
+            <Text style={styles.aiMenuTitle}>{t('ai.title')}</Text>
+            <Text style={styles.aiMenuSubtitle}>{t('ai.subtitle')}</Text>
           </View>
         </View>
 
@@ -1311,10 +1308,8 @@ function AiToolsView({
             <Text style={{ fontSize: 26 }}>🔬</Text>
           </View>
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>Распознавание по фото</Text>
-            <Text style={styles.aiMenuCardDesc}>
-              Болезни, вредители и сорняки по фотографии. Загрузите снимок — пойдёт анализ.
-            </Text>
+            <Text style={styles.aiMenuCardTitle}>{t('ai.photo.title')}</Text>
+            <Text style={styles.aiMenuCardDesc}>{t('ai.photo.sub')}</Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
         </Pressable>
@@ -1327,10 +1322,8 @@ function AiToolsView({
             <Text style={{ fontSize: 26 }}>🌾</Text>
           </View>
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>Подсчёт всходов и густоты</Text>
-            <Text style={styles.aiMenuCardDesc}>
-              Визуальный подсчёт всходов; плотность на м² только с измеренной площадью кадра.
-            </Text>
+            <Text style={styles.aiMenuCardTitle}>{t('ai.count.title')}</Text>
+            <Text style={styles.aiMenuCardDesc}>{t('ai.count.sub')}</Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
         </Pressable>
@@ -1343,10 +1336,8 @@ function AiToolsView({
             <Text style={{ fontSize: 26 }}>🌰</Text>
           </View>
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>Визуальный разбор зерна</Text>
-            <Text style={styles.aiMenuCardDesc}>
-              Предварительная оценка видимых примесей и повреждений. Не заменяет лабораторию.
-            </Text>
+            <Text style={styles.aiMenuCardTitle}>{t('ai.grain.title')}</Text>
+            <Text style={styles.aiMenuCardDesc}>{t('ai.grain.sub')}</Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
         </Pressable>
@@ -1359,10 +1350,8 @@ function AiToolsView({
             <Text style={{ fontSize: 26 }}>🐄</Text>
           </View>
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>Подсчёт поголовья скота</Text>
-            <Text style={styles.aiMenuCardDesc}>
-              Предварительная оценка числа видимых животных по фото стада или кадру с дрона.
-            </Text>
+            <Text style={styles.aiMenuCardTitle}>{t('ai.herd.title')}</Text>
+            <Text style={styles.aiMenuCardDesc}>{t('ai.herd.sub')}</Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
         </Pressable>
@@ -1375,10 +1364,8 @@ function AiToolsView({
             <Text style={{ fontSize: 26 }}>💬</Text>
           </View>
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>AI Агроном</Text>
-            <Text style={styles.aiMenuCardDesc}>
-              Чат-консультант по агрономии Акмолинской области: болезни, СЗР, сроки, нормы.
-            </Text>
+            <Text style={styles.aiMenuCardTitle}>{t('ai.chat.title')}</Text>
+            <Text style={styles.aiMenuCardDesc}>{t('ai.chat.sub')}</Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
         </Pressable>
@@ -1504,7 +1491,7 @@ function AiToolsView({
                 </View>
               </View>
 
-              <Text style={styles.aiDiagDesc}>Результат — визуальная гипотеза модели по этому кадру, не лабораторный диагноз и не оценка всего поля.</Text>
+              <Text style={styles.aiDiagDesc}>Результат — визуальная гипотеза модели по этому кадру. Проценты не являются калиброванной вероятностью, лабораторным диагнозом или оценкой всего поля.</Text>
 
               {diagnosis.description ? (
                 <Text style={styles.aiDiagDesc}>{diagnosis.description}</Text>
@@ -1594,7 +1581,7 @@ function AiToolsView({
             <Text style={{ fontSize: 40 }}>🌾</Text>
             <Text style={styles.aiUploadTitle}>Загрузите фото или видео посева</Text>
             <Text style={styles.aiUploadDesc}>
-              Для реальной плотности снимите растения внутри измеренной рамки и укажите её площадь. Без масштаба приложение покажет только визуальный подсчёт в кадре.
+              Для расчётной плотности снимите растения внутри измеренной рамки и укажите её площадь. Без масштаба приложение покажет только визуальный подсчёт в кадре.
             </Text>
             <View style={styles.aiCalibrationWrap}>
               <Text style={styles.aiCalibrationLabel}>Площадь кадра, м² (необязательно)</Text>
@@ -1695,7 +1682,7 @@ function AiToolsView({
 
                   <View style={styles.aiStandCountBox}>
                     <Text style={styles.aiStandCountNumber}>~{standResult.plant_count}</Text>
-                    <Text style={styles.aiStandCountCaption}>различимых всходов в типичном кадре</Text>
+                    <Text style={styles.aiStandCountCaption}>визуально различимых всходов в типичном кадре</Text>
                   </View>
 
                   <View style={styles.aiDiagMetricsRow}>
@@ -1729,16 +1716,16 @@ function AiToolsView({
                     <View style={styles.aiProtocolBox}>
                       <Text style={styles.aiProtocolHeading}>Расчёт по введённой площади:</Text>
                       <Text style={styles.aiDiagDesc}>
-                        Кадр {standResult.frame_area_m2} м² · эквивалент {standResult.density_per_ha >= 1000
+                        Кадр {standResult.frame_area_m2} м² · расчётный эквивалент {standResult.density_per_ha >= 1000
                           ? `${(standResult.density_per_ha / 1000).toFixed(0)} тыс./га`
                           : `${standResult.density_per_ha}/га`}
                       </Text>
-                      <Text style={styles.aiDiagDesc}>* Справочный диапазон по вероятно распознанной культуре, не индивидуальная норма высева для поля.</Text>
+                      <Text style={styles.aiDiagDesc}>* Справочный диапазон по вероятно распознанной культуре. Это визуальный учёт по кадру, не лабораторная всхожесть и не индивидуальная норма высева для поля.</Text>
                     </View>
                   ) : (
                     <View style={styles.aiProtocolBox}>
                       <Text style={styles.aiProtocolHeading}>Плотность не рассчитана</Text>
-                      <Text style={styles.aiDiagDesc}>Нужна измеренная площадь кадра. Масштаб по одному фото приложение не угадывает.</Text>
+                    <Text style={styles.aiDiagDesc}>Нужна измеренная площадь кадра. Масштаб по одному фото приложение не угадывает, поэтому плотность не калибруется.</Text>
                     </View>
                   )}
 
@@ -1876,7 +1863,7 @@ function AiToolsView({
                     <Text style={styles.aiStandCountNumber}>
                       {grainResult.sound_percent != null ? `≈ ${grainResult.sound_percent}%` : '—'}
                     </Text>
-                    <Text style={styles.aiStandCountCaption}>визуальная доля целых зёрен в кадре</Text>
+                    <Text style={styles.aiStandCountCaption}>видимая доля целых зёрен в кадре</Text>
                   </View>
 
                   {/* Показатели засорённости и повреждений */}
@@ -1910,7 +1897,7 @@ function AiToolsView({
 
                   <View style={styles.aiProtocolBox}>
                     <Text style={styles.aiProtocolHeading}>Не лабораторный результат</Text>
-                    <Text style={styles.aiDiagDesc}>Проценты рассчитаны по видимым объектам на фото, не по массе. Класс, влажность, белок и клейковина требуют отбора пробы и лаборатории.</Text>
+                    <Text style={styles.aiDiagDesc}>Проценты являются визуальной оценкой по видимым объектам на фото, не калиброванной вероятностью и не массовой долей. Класс, влажность, белок и клейковина требуют отбора пробы и лаборатории.</Text>
                   </View>
 
                   {grainResult.assessment ? (
@@ -2398,6 +2385,7 @@ function FieldsView({
   onAskAi,
   onAskFieldAi,
 }: FieldsViewProps) {
+  const { t } = useI18n();
   const [aiSummary, setAiSummary] = useState<AiFarmSummary | null>(null);
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
 
@@ -2459,7 +2447,7 @@ function FieldsView({
             onPress={onNewProfile}
             style={({ pressed }) => [styles.addChip, pressed && styles.pressed]}
           >
-            <Text style={styles.addChipText}>+ профиль</Text>
+            <Text style={styles.addChipText}>{t('fields.addProfile')}</Text>
           </Pressable>
         </ScrollView>
       </View>
@@ -2467,24 +2455,24 @@ function FieldsView({
       {/* 2. Заголовок "Участки" и статус сервера (без значка профиля сверху!) */}
       <View style={styles.fieldsHeaderRow}>
         <View style={styles.fieldsHeaderTitleWrap}>
-          <Text style={styles.screenTitle}>Участки</Text>
+          <Text style={styles.screenTitle}>{t('fields.title')}</Text>
           <Text style={styles.screenSubtitle}>
-            {selectedProfile ? `${selectedProfile.name} • ${selectedProfile.region || 'регион не указан'}` : 'Профиль не выбран'}
+            {selectedProfile ? `${selectedProfile.name} • ${selectedProfile.region || 'регион не указан'}` : t('fields.noProfile')}
           </Text>
         </View>
         <View style={styles.connectionBadge}>
           <View style={[styles.statusDot, connected ? styles.statusDotOnline : styles.statusDotOffline]} />
-          <Text style={styles.connectionText}>{connected ? 'Онлайн' : 'Офлайн'}</Text>
+          <Text style={styles.connectionText}>{connected ? t('fields.online') : t('fields.offline')}</Text>
         </View>
       </View>
 
       {/* Сводная карточка */}
       <Card style={styles.summaryCard}>
-        <SummaryCell value={fields.length} label="участков" />
+        <SummaryCell value={fields.length} label={t('fields.stat.fields')} />
         <View style={styles.summaryDivider} />
-        <SummaryCell value={totalArea.toFixed(1)} label="га" />
+        <SummaryCell value={totalArea.toFixed(1)} label={t('fields.stat.ha')} />
         <View style={styles.summaryDivider} />
-        <SummaryCell value={inspectionCount} label="осмотров" />
+        <SummaryCell value={inspectionCount} label={t('fields.stat.inspections')} />
       </Card>
 
       {/* AI-Сводка хозяйства (Option 1 & 4) */}
@@ -2504,17 +2492,17 @@ function FieldsView({
           onPress={onNewField}
           style={({ pressed }) => [styles.primaryButton, (!selectedProfile || pressed) && styles.buttonPressed]}
         >
-          <Text style={styles.primaryButtonText}>Добавить участок</Text>
+          <Text style={styles.primaryButtonText}>{t('fields.add')}</Text>
         </Pressable>
         <Pressable onPress={handleRefresh} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
-          <Text style={styles.secondaryButtonText}>Обновить</Text>
+          <Text style={styles.secondaryButtonText}>{t('fields.refresh')}</Text>
         </Pressable>
       </View>
 
       {/* Список участков */}
       <View style={styles.sectionHeaderRow}>
-        <Text style={styles.sectionTitle}>СПИСОК УЧАСТКОВ</Text>
-        <Text style={styles.sectionHint} numberOfLines={1}>удержите для удаления</Text>
+        <Text style={styles.sectionTitle}>{t('fields.listLabel')}</Text>
+        <Text style={styles.sectionHint} numberOfLines={1}>{t('fields.holdToDelete')}</Text>
       </View>
 
       {loading ? (
@@ -2532,8 +2520,8 @@ function FieldsView({
         </Card>
       ) : fields.length === 0 ? (
         <EmptyState
-          title="Нет участков в этом профиле"
-          text="Добавьте первое поле вручную или распознайте контур со спутника Sentinel-2."
+          title={t('fields.empty.title')}
+          text={t('fields.empty.sub')}
         />
       ) : (
         <Card style={styles.fieldsGroup}>
@@ -2622,6 +2610,40 @@ interface ProfileViewProps {
 }
 
 function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewProps) {
+  const { t, lang, setLang } = useI18n();
+  const [linkingTg, setLinkingTg] = useState(false);
+
+  // Hide the "Link Telegram" button inside the Telegram Mini App (already in Telegram)
+  // and once the account is already linked.
+  const insideTelegram =
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    !!(window as any)?.Telegram?.WebApp?.initData;
+  const showTelegramLink = !insideTelegram && !user?.telegramLinked;
+
+  async function handleLinkTelegram() {
+    if (linkingTg) return;
+    setLinkingTg(true);
+    try {
+      const { deepLink } = await getTelegramLinkCode();
+      if (Platform.OS === 'web') {
+        // Inside the Telegram Mini App use its own opener; in a plain browser open a tab.
+        const tg = typeof window !== 'undefined' ? (window as any)?.Telegram?.WebApp : null;
+        if (tg?.openTelegramLink) {
+          tg.openTelegramLink(deepLink);
+        } else if (typeof window !== 'undefined') {
+          window.open(deepLink, '_blank');
+        }
+      } else {
+        await Linking.openURL(deepLink);
+      }
+    } catch {
+      notify(t('profile.linkTelegram'), t('profile.linkTelegram.error'));
+    } finally {
+      setLinkingTg(false);
+    }
+  }
+
   if (isLoading || !user) {
     return (
       <View style={styles.centerBox}>
@@ -2638,8 +2660,8 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.headerTitleBlock}>
-        <Text style={styles.screenTitle}>Профиль</Text>
-        <Text style={styles.screenSubtitle}>Учётная запись агронома</Text>
+        <Text style={styles.screenTitle}>{t('nav.profile')}</Text>
+        <Text style={styles.screenSubtitle}>{t('profile.subtitle')}</Text>
       </View>
 
       {/* Avatar block */}
@@ -2653,36 +2675,72 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
       {/* Stats row */}
       {stats ? (
         <Card style={styles.statsCard}>
-          <StatCell value={stats.fieldCount} label="участков" />
+          <StatCell value={stats.fieldCount} label={t('profile.stat.fields')} />
           <StatCell
             value={stats.totalAreaHa % 1 === 0 ? stats.totalAreaHa : Number(stats.totalAreaHa.toFixed(1))}
-            label="га"
+            label={t('profile.stat.ha')}
           />
-          <StatCell value={stats.inspectionCount} label="осмотров" />
-          <StatCell value={stats.profileCount} label="профилей" />
+          <StatCell value={stats.inspectionCount} label={t('profile.stat.inspections')} />
+          <StatCell value={stats.profileCount} label={t('profile.stat.profiles')} />
         </Card>
       ) : null}
+
+      {/* Language selector */}
+      <Text style={styles.sectionTitle}>{t('profile.language')}</Text>
+      <Card style={styles.infoCard}>
+        <Pressable
+          onPress={() => setLang('ru')}
+          style={({ pressed }) => [styles.langRow, pressed && styles.pressed]}
+        >
+          <Text style={[styles.langLabel, lang === 'ru' && styles.langLabelActive]}>{t('lang.ru')}</Text>
+          {lang === 'ru' ? <Text style={styles.langCheck}>✓</Text> : null}
+        </Pressable>
+        <View style={styles.rowDivider} />
+        <Pressable
+          onPress={() => setLang('kk')}
+          style={({ pressed }) => [styles.langRow, pressed && styles.pressed]}
+        >
+          <Text style={[styles.langLabel, lang === 'kk' && styles.langLabelActive]}>{t('lang.kk')}</Text>
+          {lang === 'kk' ? <Text style={styles.langCheck}>✓</Text> : null}
+        </Pressable>
+      </Card>
+
+      {/* Link Telegram — hidden inside the Mini App and once already linked */}
+      {showTelegramLink && (
+        <Pressable
+          onPress={() => void handleLinkTelegram()}
+          disabled={linkingTg}
+          style={({ pressed }) => [styles.tgLinkButton, (pressed || linkingTg) && styles.pressed]}
+        >
+          <Text style={styles.tgLinkIcon}>✈️</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.tgLinkTitle}>{t('profile.linkTelegram')}</Text>
+            <Text style={styles.tgLinkSub}>{t('profile.linkTelegram.sub')}</Text>
+          </View>
+          {linkingTg ? <ActivityIndicator size="small" color="#fff" /> : null}
+        </Pressable>
+      )}
 
       {/* Button for new farm profile */}
       <Pressable
         onPress={onNewProfile}
         style={({ pressed }) => [styles.profileAddButton, pressed && styles.pressed]}
       >
-        <Text style={styles.profileAddButtonText}>+ Создать новый профиль хозяйства</Text>
+        <Text style={styles.profileAddButtonText}>{t('profile.newProfile')}</Text>
       </Pressable>
 
       {/* Account info */}
-      <Text style={styles.sectionTitle}>ДАННЫЕ АККАУНТА</Text>
+      <Text style={styles.sectionTitle}>{t('profile.accountData')}</Text>
       <Card style={styles.infoCard}>
-        <InfoRow label="Email" value={user.email} />
+        <InfoRow label={t('profile.email')} value={user.email} />
         <View style={styles.rowDivider} />
-        <InfoRow label="Организация" value={user.organization || '—'} />
+        <InfoRow label={t('profile.org')} value={user.organization || '—'} />
         <View style={styles.rowDivider} />
-        <InfoRow label="Регион" value={user.region || '—'} />
+        <InfoRow label={t('profile.region')} value={user.region || '—'} />
         <View style={styles.rowDivider} />
         <InfoRow
-          label="Дата регистрации"
-          value={new Date(user.createdAt).toLocaleDateString('ru-RU', {
+          label={t('profile.registered')}
+          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : 'ru-RU', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',
@@ -2695,7 +2753,7 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
         onPress={() => void onLogout()}
         style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]}
       >
-        <Text style={styles.logoutText}>Выйти из аккаунта</Text>
+        <Text style={styles.logoutText}>{t('profile.logout')}</Text>
       </Pressable>
     </ScrollView>
   );
@@ -2704,6 +2762,27 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
 /* =========================================================================
    Helper Components
    ========================================================================= */
+// Feather/Lucide-style vector paths (24x24, stroke) for the web / Telegram Mini App,
+// where iOS SF Symbols (SymbolView) do not render. Keeps the nav and menu icons crisp.
+const WEB_ICON_PATHS: Record<string, string[]> = {
+  cpu: [
+    'M6 6h12v12H6z',
+    'M9 9h6v6H9z',
+    'M9 1v3 M15 1v3 M9 20v3 M15 20v3 M1 9h3 M1 15h3 M20 9h3 M20 15h3',
+  ],
+  'square.grid.2x2': ['M3 3h7v7H3z', 'M14 3h7v7h-7z', 'M14 14h7v7h-7z', 'M3 14h7v7H3z'],
+  'person.crop.circle': ['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2', 'M12 7m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0'],
+  leaf: [
+    'M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.52-4.48 10-10 10z',
+    'M2 21c0-3 1.85-5.36 5.08-6',
+  ],
+  sparkles: ['M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z'],
+  'chevron.right': ['M9 6l6 6-6 6'],
+  'chevron.left': ['M15 6l-6 6 6 6'],
+  'arrow.clockwise': ['M23 4v6h-6', 'M20.49 15a9 9 0 1 1-2.12-9.36L23 10'],
+  'arrow.up.right': ['M7 17L17 7', 'M8 7h9v9'],
+};
+
 function AppIcon({
   name,
   size = 20,
@@ -2713,6 +2792,28 @@ function AppIcon({
   size?: number;
   color?: string;
 }) {
+  if (Platform.OS === 'web') {
+    const paths = WEB_ICON_PATHS[name as string];
+    if (paths) {
+      // Rendered as real DOM <svg> by react-dom under react-native-web.
+      return (
+        <svg
+          width={size}
+          height={size}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={color}
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {paths.map((d, i) => (
+            <path key={i} d={d} />
+          ))}
+        </svg>
+      );
+    }
+  }
   return (
     <SymbolView
       name={name}
@@ -4189,6 +4290,55 @@ const styles = StyleSheet.create({
     fontFamily: fontFamilies.semiBold,
     fontSize: 13.5,
     color: '#DC2626',
+  },
+
+  /* Telegram link button */
+  tgLinkButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#229ED9',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    minHeight: 60,
+  },
+  tgLinkIcon: {
+    fontSize: 24,
+  },
+  tgLinkTitle: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 15,
+    color: '#FFFFFF',
+  },
+  tgLinkSub: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.85)',
+    marginTop: 2,
+  },
+
+  /* Language selector */
+  langRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    minHeight: 48,
+  },
+  langLabel: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 15,
+    color: colors.text,
+  },
+  langLabelActive: {
+    fontFamily: fontFamilies.semiBold,
+    color: colors.primary,
+  },
+  langCheck: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 16,
+    color: colors.primary,
   },
 
   /* Error & Loader */

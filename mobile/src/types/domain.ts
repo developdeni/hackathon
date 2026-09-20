@@ -64,6 +64,7 @@ export type User = {
   organization: string;
   region: string;
   createdAt: string;
+  telegramLinked?: boolean;
   stats?: {
     fieldCount: number;
     inspectionCount: number;
