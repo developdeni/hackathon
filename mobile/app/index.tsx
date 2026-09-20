@@ -1130,19 +1130,18 @@ function AiToolsView({
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
+    const priorHistory = messages.filter((m) => m.id !== 'welcome').slice(-30);
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
     void saveAiChatHistory(nextMessages);
     setIsAnswering(true);
 
     try {
-      // Only send last 10 messages as context to reduce payload and latency
-      const recentHistory = nextMessages.slice(-10);
       const combinedContext = {
         ...(farmContext || {}),
         ...(extraContext ? { diagnosis: extraContext } : {}),
       };
-      const answer = await askAiAgronomist(q, recentHistory, combinedContext);
+      const answer = await askAiAgronomist(q, priorHistory, combinedContext);
       const aiMsg: AiChatMessage = {
         id: `ai_${Date.now()}`,
         sender: 'ai',

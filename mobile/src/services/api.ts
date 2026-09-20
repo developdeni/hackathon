@@ -733,7 +733,7 @@ export async function askAiAgronomist(
   history?: AiChatMessage[],
   farmContext?: any
 ): Promise<string> {
-  const historyPayload = history?.slice(-10).map((m) => ({
+  const historyPayload = history?.slice(-30).map((m) => ({
     role: m.sender === 'user' ? 'user' : 'model',
     text: cleanAiText(m.text),
   }));

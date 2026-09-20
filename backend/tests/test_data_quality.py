@@ -330,3 +330,25 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(passed_ctx["coordinates"]["longitude"], 71.30)
                 self.assertEqual(passed_ctx["weather"], fake_weather)
 
+    def test_build_gemini_contents_sanitizes_multiturn_dialogue_and_removes_duplicates(self):
+        raw_history = [
+            {"role": "model", "text": "Здравствуйте! Я цифровой агроном Tanap AI..."},
+            {"role": "user", "text": "Моё хозяйство 500 га яровой пшеницы"},
+            {"role": "model", "text": "Принято! 500 га пшеницы в Акмолинской области."},
+            {"role": "user", "text": "Сколько у меня гектар?"},  # duplicate already in history
+        ]
+        current_question = "Сколько у меня гектар?"
+        contents = ai_advisor.build_gemini_contents(current_question, raw_history)
+
+        # 1. Dialogue must start with user turn (welcome greeting dropped)
+        self.assertEqual(contents[0]["role"], "user")
+        self.assertEqual(contents[0]["parts"][0]["text"], "Моё хозяйство 500 га яровой пшеницы")
+
+        # 2. Dialogue must alternate strictly user -> model -> user
+        self.assertEqual(contents[1]["role"], "model")
+        self.assertEqual(contents[2]["role"], "user")
+        self.assertEqual(contents[2]["parts"][0]["text"], "Сколько у меня гектар?")
+
+        # 3. No duplicate consecutive user turns at the end
+        self.assertEqual(len(contents), 3)
+

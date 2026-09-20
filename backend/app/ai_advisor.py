@@ -15,17 +15,21 @@ from PIL import Image
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L8PPAiT6XJDA7hdSOpVdXwsB6bCGMatS1FfzONO4oIgg")
 # Каскад проверенных высокоскоростных моделей Google Gemini с активной квотой
 GEMINI_MODELS = [
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview",
 ]
 # Фото-диагностика: мультимодальный каскад проверенных моделей Gemini Vision
 VISION_MODELS = [
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview",
 ]
 
 
@@ -1325,7 +1329,8 @@ AGRONOMIST_SYSTEM_PROMPT = (
     "3. Отвечай подробно, профессионально, практично, опираясь на переданные параметры хозяйства и полей.\n"
     "4. Не придумывай непроверенные полевые замеры, урожайность или лабораторные показатели; четко отделяй "
     "фактические параметры хозяйства от экспертных рекомендаций.\n"
-    "5. Регламенты СЗР и дозировки всегда привязывай к фазе культуры и официальной тарной этикетке зарегистрированного в РК препарата."
+    "5. Регламенты СЗР и дозировки всегда привязывай к фазе культуры и официальной тарной этикетке зарегистрированного в РК препарата.\n"
+    "6. СОХРАНЕНИЕ КОНТЕКСТА ДИАЛОГА: Ты обязан внимательно помнить и учитывать все предыдущие реплики пользователя и свои ответы в этом диалоге. Если пользователь задает уточняющие вопросы ('а какая норма для него?', 'сколько у меня га?', 'а если заморозки?', 'что делать дальше?'), отвечай строго в контексте ранее обсуждавшихся полей, культур, площадей и параметров. Не переспрашивай то, что пользователь уже сообщал в диалоге."
 )
 
 
@@ -1481,6 +1486,62 @@ def format_hidden_farm_context(farm_context: Any) -> str:
     return "\n".join(lines)
 
 
+def build_gemini_contents(question: str, history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """
+    Constructs a strictly compliant, multi-turn conversation payload for Google Gemini API:
+    1. Removes welcome greetings from AI to ensure dialogue starts with a real user turn.
+    2. Drops leading model turns so contents[0]["role"] == "user".
+    3. Prevents duplicate consecutive user messages if the current question was already appended.
+    4. Merges consecutive turns of the same role to satisfy Gemini alternating role requirements.
+    5. Appends the current user question as the final turn.
+    """
+    clean_q = question.strip()
+    raw_turns: list[dict[str, str]] = []
+
+    if history and isinstance(history, list):
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            r = str(msg.get("role") or msg.get("sender") or "").lower().strip()
+            role = "user" if r in ["user", "farmer"] else "model"
+            text = str(msg.get("text") or msg.get("content") or "").strip()
+            if not text:
+                continue
+            # Drop default welcome greetings from history so dialogue begins with genuine user input
+            if "Здравствуйте! Я цифровой агроном" in text or "Я цифровой агроном Tanap AI" in text:
+                continue
+            raw_turns.append({"role": role, "text": text})
+
+    # If the last item in history is identical to the current question, pop it to avoid duplicate user turn
+    if raw_turns and raw_turns[-1]["role"] == "user" and raw_turns[-1]["text"] == clean_q:
+        raw_turns.pop()
+
+    # Drop leading model messages so that the conversation strictly starts with a user turn
+    while raw_turns and raw_turns[0]["role"] != "user":
+        raw_turns.pop(0)
+
+    # Append current question
+    raw_turns.append({"role": "user", "text": clean_q})
+
+    # Merge consecutive turns of the same role (user + user -> user, model + model -> model)
+    merged_turns: list[dict[str, str]] = []
+    for turn in raw_turns:
+        if merged_turns and merged_turns[-1]["role"] == turn["role"]:
+            merged_turns[-1]["text"] += "\n\n" + turn["text"]
+        else:
+            merged_turns.append(turn)
+
+    # Format for Gemini API
+    gemini_contents: list[dict[str, Any]] = []
+    for turn in merged_turns:
+        gemini_contents.append({
+            "role": turn["role"],
+            "parts": [{"text": turn["text"]}],
+        })
+
+    return gemini_contents
+
+
 def _query_gemini_chat(
     question: str,
     history: list[dict[str, Any]] | None = None,
@@ -1495,16 +1556,7 @@ def _query_gemini_chat(
         return None
 
     try:
-        contents: list[dict[str, Any]] = []
-        if history:
-            for msg in history:
-                role = "user" if msg.get("role") in ["user", "farmer"] or msg.get("sender") == "user" else "model"
-                text = str(msg.get("text") or msg.get("content") or "").strip()
-                if text:
-                    contents.append({"role": role, "parts": [{"text": text}]})
-
-        # The user message contains ONLY the clean user question
-        contents.append({"role": "user", "parts": [{"text": question.strip()}]})
+        contents = build_gemini_contents(question, history)
 
         system_instruction_text = AGRONOMIST_SYSTEM_PROMPT
         if system_context and system_context.strip():
