@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { Text } from '../../src/components/AppText';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Marker, Polygon } from 'react-native-maps';
+import MapView, { Marker, Polygon } from '../../src/components/AppMapView';
 
 import { Badge } from '../../src/components/Badge';
 import { Card } from '../../src/components/Card';

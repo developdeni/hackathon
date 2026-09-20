@@ -11,7 +11,7 @@ import {
 import { Text, TextInput } from '../../src/components/AppText';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Location from 'expo-location';
-import MapView, { MapPressEvent, Marker, Polygon, Region } from 'react-native-maps';
+import MapView, { MapPressEvent, Marker, Polygon, Region } from '../../src/components/AppMapView';
 
 import { Card } from '../../src/components/Card';
 import { Screen } from '../../src/components/Screen';

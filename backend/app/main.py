@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField
@@ -354,15 +355,38 @@ app.add_middleware(
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
-TMA_DIR = Path(__file__).resolve().parent / "static" / "tma"
-TMA_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/tma", StaticFiles(directory=TMA_DIR, html=True), name="tma")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+DIST_DIR = STATIC_DIR / "dist"
+TMA_DIR = STATIC_DIR / "tma"
+
+if (DIST_DIR / "_expo").exists():
+    app.mount("/_expo", StaticFiles(directory=DIST_DIR / "_expo"), name="expo")
+if (DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="expo-assets")
+
+if TMA_DIR.exists():
+    app.mount("/tma/legacy", StaticFiles(directory=TMA_DIR, html=True), name="tma-legacy")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    fav = DIST_DIR / "favicon.ico"
+    if fav.is_file():
+        return FileResponse(fav)
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 @app.get("/")
-def root_redirect():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/tma/")
+@app.get("/tma")
+@app.get("/tma/")
+def serve_spa_root():
+    index_file = DIST_DIR / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    tma_index = TMA_DIR / "index.html"
+    if tma_index.is_file():
+        return FileResponse(tma_index)
+    return {"message": "Tanap AI API"}
 
 
 # ---------------------------------------------------------------------------
@@ -1548,4 +1572,16 @@ async def ai_agronomic_chat(input_data: AiChatInput) -> dict:
         farm_ctx,
     )
     return {"question": input_data.question, "answer": answer}
+
+
+@app.get("/{full_path:path}")
+def serve_spa_fallback(full_path: str):
+    file_path = DIST_DIR / full_path
+    if file_path.is_file():
+        return FileResponse(file_path)
+    index_file = DIST_DIR / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="Not found")
+
 

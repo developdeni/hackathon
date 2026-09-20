@@ -40,7 +40,10 @@ import {
   saveLocalCache,
 } from './offline';
 
-export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'https://lamps-sat-increases-pencil.trycloudflare.com';
+export const API_URL =
+  typeof window !== 'undefined' && window.location?.origin && window.location.origin.startsWith('http')
+    ? window.location.origin
+    : (process.env.EXPO_PUBLIC_API_URL ?? 'https://lamps-sat-increases-pencil.trycloudflare.com');
 
 export class ApiRequestError extends Error {
   status: number;
@@ -145,6 +148,19 @@ export function loginUser(input: LoginInput) {
 
 export function registerUser(input: RegisterInput) {
   return apiFetch<AuthResponse>('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function telegramAuthUser(input: {
+  telegramId: number | string;
+  name: string;
+  companyName: string;
+  username?: string | null;
+}) {
+  return apiFetch<AuthResponse>('/api/auth/telegram-webapp', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
