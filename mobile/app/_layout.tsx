@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -12,8 +13,10 @@ import {
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { AuthProvider } from '../src/contexts/AuthContext';
+import { BroldSplashIntro } from '../src/components/BroldSplashIntro';
 
 export default function RootLayout() {
+  const [showSplash, setShowSplash] = useState(true);
   const [fontsLoaded] = useFonts({
     Montserrat_400Regular,
     Montserrat_500Medium,
@@ -80,6 +83,8 @@ export default function RootLayout() {
         {/* Inspection */}
         <Stack.Screen name="inspection/[id]" options={{ title: 'Осмотр', headerBackTitle: 'Назад' }} />
       </Stack>
+
+      {showSplash && <BroldSplashIntro onFinish={() => setShowSplash(false)} />}
     </AuthProvider>
   );
 }
