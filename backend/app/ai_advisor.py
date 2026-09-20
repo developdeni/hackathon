@@ -29,8 +29,37 @@ VISION_MODELS = [
 ]
 
 
+def clean_agronomic_text(text: str) -> str:
+    """
+    Cleans agronomic text output:
+    1. Removes triple dashes / horizontal rules (---, ———, – – –, ___).
+    2. Strips markdown asterisks (*, **, ***) used for bold/italic/lists.
+    3. Normalizes blank lines and list bullets.
+    """
+    if not text:
+        return ""
+
+    # Remove markdown dividers: lines that only contain ---, ***, ___, –––, ———
+    text = re.sub(r"(?m)^[\s\t]*[-—–_*]{2,}[\s\t]*$", "", text)
+    # Remove inline runs of 3 or more dashes/hyphens/em-dashes
+    text = re.sub(r"[-—–]{3,}", "", text)
+
+    # Remove bold/italic markdown asterisks: ***text*** -> text, **text** -> text, *text* -> text
+    text = re.sub(r"\*{3}(.*?)\*{3}", r"\1", text)
+    text = re.sub(r"\*{2}(.*?)\*{2}", r"\1", text)
+    text = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"\1", text)
+    # If any list items start with "* ", replace with "• "
+    text = re.sub(r"(?m)^[\s\t]*\*\s+", "• ", text)
+    # Remove any remaining asterisks
+    text = text.replace("*", "")
+
+    # Collapse 3+ newlines into 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 # ---------------------------------------------------------------------------
-# Agronomic Knowledge Base for Northern Kazakhstan (Akmola / Kostanay / NKO)
+# Agronomic Knowledge Base for Akmola Region, Kazakhstan
 # ---------------------------------------------------------------------------
 
 AGRONOMIC_DISEASES = [
@@ -135,8 +164,9 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
         b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
 
         prompt = (
-            "Ты — ведущий эксперт-агроном Tanap AI для Северного и Центрального Казахстана "
-            "(Акмолинская, Костанайская, СКО). Проведи предварительную визуальную интерпретацию фото.\n\n"
+            "Ты — ведущий эксперт-агроном Tanap AI, специализированный строго на сельском хозяйстве "
+            "Акмолинской области (Республика Казахстан). Проведи предварительную визуальную интерпретацию фото "
+            "с учётом почвенно-климатических условий степной зоны Акмолинской области.\n\n"
             "КРИТИЧЕСКОЕ ПРАВИЛО 1 (ОПРЕДЕЛЕНИЕ ОБЪЕКТА):\n"
             "Сначала определи, действительно ли на фото живое растение, лист, колос, сорняк, поле или вредитель.\n"
             "Если на фото экран монитора/компьютера, скриншот, интерьер, комната, человек, автомобиль, бытовой предмет, "
@@ -144,9 +174,12 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
             "category = \"none\", detected = false!\n\n"
             "КРИТИЧЕСКОЕ ПРАВИЛО 2 (ДИНАМИЧЕСКИЙ АНАЛИЗ БЕЗ ОГРАНИЧЕНИЙ):\n"
             "Формируй гипотезу по наблюдаемым визуальным признакам на снимке, НЕ ограничиваясь шаблонами.\n"
-            "Определяй ЛЮБУЮ культуру (яровая пшеница, озимая пшеница, ячмень, рапс, подсолнечник, лен, овес, чечевица, горох, соя, кукуруза, картофель и др.).\n"
-            "Диагностируй ЛЮБЫЕ патологии: листовые и стеблевые ржавчины, пятнистости (септориоз, гельминтоспориоз, темно-бурая, сетчатая), фузариоз, альтернариоз, мучнистая роса, бактериозы, хлорозы, дефициты макро- и микроэлементов (N, P, K, Mg, S, Fe, Zn), гербицидный токсикоз.\n"
-            "Идентифицируй любых вредителей (злаковая тля, хлебный жук, пьявица, трипсы, совка, саранча, клоп-черепашка, блошки) или сорные растения (осот, вьюнок, овсюг, марь, щетинник, щирица).\n\n"
+            "Определяй ЛЮБУЮ культуру региона (яровая пшеница, озимая пшеница, ячмень, яровой рапс, подсолнечник, лен масличный, овес, чечевица, горох, соя, кукуруза, картофель и др.).\n"
+            "Диагностируй ЛЮБЫЕ патологии: листовые и стеблевые ржавчины (желтая, бурая, стеблевая), пятнистости (септориоз, гельминтоспориоз, темно-бурая, сетчатая), фузариоз колоса, альтернариоз, мучнистая роса, бактериозы, хлорозы, дефициты макро- и микроэлементов (N, P, K, Mg, S, Fe, Zn), гербицидный токсикоз.\n"
+            "Идентифицируй любых вредителей (злаковая тля, хлебный жук, пьявица, трипсы, совка, саранча, клоп-черепашка, блошки) или сорные растения (осот розовый и желтый, вьюнок, овсюг, марь белая, щетинник, гречишка татарская, щирица).\n\n"
+            "КРИТИЧЕСКОЕ ПРАВИЛО 3 (ФОРМАТИРОВАНИЕ И СТИЛЬ ДЛЯ АКМОЛИНСКОЙ ОБЛАСТИ):\n"
+            "Все рекомендации по СЗР, дозировкам и агроприёмам должны соответствовать специфике Акмолинской области и Государственному реестру пестицидов РК.\n"
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать звёздочки ('*', '**', '***') и разделители из трёх тире ('---', '———') в тексте. Пиши чистым обычным текстом.\n\n"
             "Категории (поле category):\n"
             "  • \"disease\" — болезнь или дефицит питания живого растения;\n"
             "  • \"pest\" — вредитель или характерные повреждения от него;\n"
@@ -159,15 +192,15 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
             '  "category": "disease | pest | weed | healthy | none",\n'
             '  "crop": "Вероятная культура или \'—\' если сорняк/не растение",\n'
             '  "object_name": "Конкретное наименование объекта (напр. \'Сетчатая пятнистость ячменя\', \'Злаковая тля\', \'Осот желтый полевой\', \'Экран монитора / интерьер\')",\n'
-            '  "diagnosis": "Диагноз или экспертный вывод по снимку",\n'
+            '  "diagnosis": "Диагноз или экспертный вывод по снимку для Акмолинской области",\n'
             '  "pathogen": "Латинское название возбудителя/вида или физиологическая причина (или \'—\')",\n'
             '  "severity": "low | moderate | high",\n'
             '  "affected_area_percent": 15.0,\n'
             '  "description": "Описание наблюдаемых визуальных признаков на органе растения и возможных альтернатив",\n'
             '  "recommendation": "Агрономический план действий",\n'
-            '  "chemicals": "Рекомендуемые действующие вещества препаратов под обнаруженный объект (или \'—\')",\n'
+            '  "chemicals": "Рекомендуемые действующие вещества препаратов под обнаруженный объект из реестра РК (или \'—\')",\n'
             '  "rate": "Норма расхода препарата (или \'—\')",\n'
-            '  "weather_limits": "Агрометеорологическое окно обработки (температура, ветер, осадки)",\n'
+            '  "weather_limits": "Агрометеорологическое окно обработки для степной зоны (температура, ветер, осадки)",\n'
             '  "yield_loss": "Не рассчитывается по одному фото; нужна полевая оценка распространённости и развития"\n'
             "}\n"
         )
@@ -205,16 +238,16 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
                             return {
                                 "detected": False,
                                 "category": "none",
-                                "object_name": str(parsed.get("object_name") or "Не растение"),
+                                "object_name": clean_agronomic_text(str(parsed.get("object_name") or "Не растение")),
                                 "crop": "—",
-                                "diagnosis": str(parsed.get("diagnosis") or "Растение на снимке не обнаружено"),
+                                "diagnosis": clean_agronomic_text(str(parsed.get("diagnosis") or "Растение на снимке не обнаружено")),
                                 "pathogen": "—",
                                 "severity": "low",
                                 "confidence": None,
                                 "affected_area_percent": None,
                                 "metric_basis": "visual_model_interpretation",
-                                "description": str(parsed.get("description") or "На снимке не обнаружено сельскохозяйственных растений."),
-                                "recommendation": str(parsed.get("recommendation") or "Сделайте чёткий снимок листа, колоса или сорняка крупным планом при хорошем освещении."),
+                                "description": clean_agronomic_text(str(parsed.get("description") or "На снимке не обнаружено сельскохозяйственных растений.")),
+                                "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "Сделайте чёткий снимок листа, колоса или сорняка крупным планом при хорошем освещении.")),
                                 "chemicals": "—",
                                 "rate": "—",
                                 "weather_limits": "—",
@@ -228,19 +261,19 @@ def _query_gemini_vision(image_bytes: bytes) -> dict[str, Any] | None:
                         return {
                             "detected": True,
                             "category": category,
-                            "object_name": str(parsed.get("object_name") or parsed.get("diagnosis") or "Сельхозкультура"),
-                            "crop": str(parsed.get("crop") or "Сельхозкультура"),
-                            "diagnosis": str(parsed.get("diagnosis") or "Агрономический осмотр"),
-                            "pathogen": str(parsed.get("pathogen") or "—"),
+                            "object_name": clean_agronomic_text(str(parsed.get("object_name") or parsed.get("diagnosis") or "Сельхозкультура")),
+                            "crop": clean_agronomic_text(str(parsed.get("crop") or "Сельхозкультура")),
+                            "diagnosis": clean_agronomic_text(str(parsed.get("diagnosis") or "Агрономический осмотр")),
+                            "pathogen": clean_agronomic_text(str(parsed.get("pathogen") or "—")),
                             "severity": severity,
                             "confidence": None,
                             "affected_area_percent": _pct(parsed.get("affected_area_percent")),
                             "metric_basis": "visual_model_interpretation",
-                            "description": str(parsed.get("description") or ""),
-                            "recommendation": str(parsed.get("recommendation") or ""),
-                            "chemicals": str(parsed.get("chemicals") or "—"),
-                            "rate": str(parsed.get("rate") or "—"),
-                            "weather_limits": str(parsed.get("weather_limits") or "—"),
+                            "description": clean_agronomic_text(str(parsed.get("description") or "")),
+                            "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "")),
+                            "chemicals": clean_agronomic_text(str(parsed.get("chemicals") or "—")),
+                            "rate": clean_agronomic_text(str(parsed.get("rate") or "—")),
+                            "weather_limits": clean_agronomic_text(str(parsed.get("weather_limits") or "—")),
                             "yield_loss": "Не рассчитывается по одному фото; нужна полевая оценка распространённости и развития болезни",
                         }
             except Exception:
@@ -446,7 +479,8 @@ STAND_NORMS = {
 
 _STAND_PROMPT = (
     "Ты — эксперт по агроскаутингу и дистанционной оценке посевов Tanap AI "
-    "для Северного и Центрального Казахстана. Тебе дан материал посева: наземное фото рядков, "
+    "для Акмолинской области (Северный Казахстан, богарное земледелие, зона южных чернозёмов и темно-каштановых почв). "
+    "Тебе дан материал посева: наземное фото рядков, "
     "макро-кадр, ортоснимок/кадр с квадрокоптера (вид сверху) ЛИБО видео облёта поля дроном.\n\n"
     "ЗАДАЧА: посчитать видимые всходы. Если это ВИДЕО — рассматривай наиболее чёткие "
     "репрезентативные кадры и верни типичное число видимых растений в одном кадре.\n\n"
@@ -457,6 +491,8 @@ _STAND_PROMPT = (
     "на м²/га, процент пропусков или вероятность точности: без масштаба эти величины не измеримы.\n\n"
     "ПРАВИЛО 3 (агрооценка): определи вероятную культуру (crop) и только категориально оцени "
     "равномерность видимых рядков (uniformity: low|moderate|high).\n\n"
+    "ПРАВИЛО 4 (форматирование): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать звёздочки ('*', '**', '***') "
+    "и разделители из трёх тире ('---', '———') в тексте. Пиши обычным чистым текстом.\n\n"
     "Верни СТРОГО валидный JSON:\n"
     "{\n"
     '  "detected": true,\n'
@@ -465,7 +501,7 @@ _STAND_PROMPT = (
     '  "crop": "Название культуры или \'—\'",\n'
     '  "plant_count": 128,\n'
     '  "uniformity": "low | moderate | high",\n'
-    '  "assessment": "Краткий вывод только по видимым растениям и равномерности кадра",\n'
+    '  "assessment": "Краткий вывод только по видимым растениям и равномерности кадра в условиях Акмолинской области",\n'
     '  "recommendation": "Как повторить учёт на нескольких калиброванных площадках"\n'
     "}\n"
 )
@@ -487,7 +523,7 @@ def _stand_unavailable(message: str) -> dict[str, Any]:
         "gap_percent": None,
         "confidence": None,
         "measurement_basis": "unavailable",
-        "assessment": message,
+        "assessment": clean_agronomic_text(message),
         "recommendation": "—",
     }
 
@@ -514,8 +550,8 @@ def _normalize_stand_result(
             "gap_percent": None,
             "confidence": None,
             "measurement_basis": "user_calibrated_area" if calibrated_area_m2 else "visual_count_unscaled",
-            "assessment": str(parsed.get("assessment") or "На материале не обнаружено посева/всходов."),
-            "recommendation": "Снимите рядки всходов крупным планом или сделайте облёт участка дроном при дневном свете.",
+            "assessment": clean_agronomic_text(str(parsed.get("assessment") or "На материале не обнаружено посева/всходов.")),
+            "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "Снимите рядки всходов крупным планом или сделайте облёт участка дроном при дневном свете.")),
         }
 
     shot_type = str(parsed.get("shot_type") or "ground").lower().strip()
@@ -527,7 +563,7 @@ def _normalize_stand_result(
     density = round(plant_count / frame_area, 1) if frame_area else None
     density_ha = int(round(density * 10000)) if density is not None else None
 
-    crop = str(parsed.get("crop") or "—").strip()
+    crop = clean_agronomic_text(str(parsed.get("crop") or "—").strip())
     crop_key = crop.lower()
     norm = None
     for key, rng in STAND_NORMS.items():
@@ -567,8 +603,8 @@ def _normalize_stand_result(
         "gap_percent": None,
         "confidence": None,
         "measurement_basis": "user_calibrated_area" if frame_area else "visual_count_unscaled",
-        "assessment": str(parsed.get("assessment") or "Оценка густоты стояния выполнена."),
-        "recommendation": str(parsed.get("recommendation") or "—"),
+        "assessment": clean_agronomic_text(str(parsed.get("assessment") or "Оценка густоты стояния выполнена.")),
+        "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "—")),
     }
 
 
@@ -798,18 +834,19 @@ def count_seedlings_in_video_frames(
 # ---------------------------------------------------------------------------
 
 _GRAIN_PROMPT = (
-    "Ты — система предварительного визуального разбора фото зерновой пробы Tanap AI. "
+    "Ты — система предварительного визуального разбора фото зерновой пробы Tanap AI "
+    "для хозяйств Акмолинской области (Республика Казахстан). "
     "Тебе дано фото зерновой пробы (россыпь зерна на ровной поверхности).\n\n"
     "ЗАДАЧА: оценить только видимый состав объектов в кадре. Это не лабораторный анализ по ГОСТ: "
     "по фото нельзя определить массовую долю, влажность, белок, клейковину или класс зерна.\n\n"
     "ПРАВИЛО 1 (валидация): если на фото НЕ зерновая проба (экран, интерьер, человек, растение в поле, "
     "техника, посторонний предмет) — верни detected=false, is_grain=false.\n\n"
-    "ПРАВИЛО 2 (анализ): определи культуру (crop: пшеница, ячмень, овёс, рожь, рапс, подсолнечник, лён, "
+    "ПРАВИЛО 2 (анализ): определи культуру (crop: пшеница мягкая яровая, пшеница твердая, ячмень, овёс, рожь, рапс яровой, подсолнечник, лён масличный, "
     "гречиха, просо, горох, чечевица и др.). Оцени приблизительные доли по числу/видимой площади "
     "объектов в этом кадре (не по массе; сумма ≈ 100):\n"
     "  • sound_percent — чистое доброкачественное (основное) зерно без дефектов;\n"
     "  • weed_impurity_percent — СОРНАЯ примесь: минеральная (земля, камешки, песок), органическая "
-    "(частицы стеблей, плёнки, ости), семена сорняков, испорченное/гнилое зерно;\n"
+    "(частицы стеблей, плёнки, ости), семена сорняков степной зоны, испорченное/гнилое зерно;\n"
     "  • grain_impurity_percent — ЗЕРНОВАЯ примесь: щуплое, проросшее, недозрелое, давленое, зёрна других "
     "культур, изъеденное зерно;\n"
     "  • broken_percent — БИТОЕ/дроблёное зерно (механически расколотые, половинки);\n"
@@ -818,6 +855,8 @@ _GRAIN_PROMPT = (
     "ПРАВИЛО 3 (оценка): оцени примерное число зёрен в кадре (grain_count) и только визуальное "
     "состояние (quality_rating): \"good\" (визуально чистая), \"acceptable\" (смешанная), "
     "\"poor\" (много видимых примесей/повреждений). Не присваивай класс зерна.\n\n"
+    "ПРАВИЛО 4 (форматирование): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать звёздочки ('*', '**', '***') "
+    "и разделители из трёх тире ('---', '———') в тексте. Пиши обычным чистым текстом.\n\n"
     "Верни СТРОГО валидный JSON:\n"
     "{\n"
     '  "detected": true,\n'
@@ -831,7 +870,7 @@ _GRAIN_PROMPT = (
     '  "damaged_percent": 1.0,\n'
     '  "grade": "Требуется лабораторный анализ",\n'
     '  "quality_rating": "good | acceptable | poor",\n'
-    '  "assessment": "Краткий вывод по чистоте и повреждениям пробы",\n'
+    '  "assessment": "Краткий вывод по чистоте и повреждениям пробы в Акмолинской области",\n'
     '  "recommendation": "Рекомендация (доработка на решётах, сушка, сепарация, условия хранения)"\n'
     "}\n"
 )
@@ -853,7 +892,7 @@ def _grain_unavailable(message: str) -> dict[str, Any]:
         "confidence": None,
         "measurement_basis": "unavailable",
         "laboratory_grade_available": False,
-        "assessment": message,
+        "assessment": clean_agronomic_text(message),
         "recommendation": "—",
     }
 
@@ -886,8 +925,8 @@ def _normalize_grain_result(parsed: dict[str, Any]) -> dict[str, Any]:
             "confidence": None,
             "measurement_basis": "visual_area_estimate",
             "laboratory_grade_available": False,
-            "assessment": str(parsed.get("assessment") or "На фото не обнаружено зерновой пробы."),
-            "recommendation": "Рассыпьте зерно тонким слоем на ровной однотонной поверхности и сфотографируйте крупным планом при дневном свете.",
+            "assessment": clean_agronomic_text(str(parsed.get("assessment") or "На фото не обнаружено зерновой пробы.")),
+            "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "Рассыпьте зерно тонким слоем на ровной однотонной поверхности и сфотографируйте крупным планом при дневном свете.")),
         }
 
     weed = _pct(parsed.get("weed_impurity_percent"))
@@ -914,7 +953,7 @@ def _normalize_grain_result(parsed: dict[str, Any]) -> dict[str, Any]:
     return {
         "detected": True,
         "is_grain": True,
-        "crop": str(parsed.get("crop") or "Зерновая культура").strip() or "Зерновая культура",
+        "crop": clean_agronomic_text(str(parsed.get("crop") or "Зерновая культура").strip() or "Зерновая культура"),
         "grain_count": max(int(round(float(parsed.get("grain_count", 0) or 0))), 0),
         "sound_percent": sound,
         "weed_impurity_percent": weed,
@@ -926,8 +965,8 @@ def _normalize_grain_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "confidence": None,
         "measurement_basis": "visual_area_estimate",
         "laboratory_grade_available": False,
-        "assessment": str(parsed.get("assessment") or "Оценка качества зерна выполнена."),
-        "recommendation": str(parsed.get("recommendation") or "—"),
+        "assessment": clean_agronomic_text(str(parsed.get("assessment") or "Оценка качества зерна выполнена.")),
+        "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "—")),
     }
 
 
@@ -982,7 +1021,7 @@ def analyze_grain_quality_bytes(image_bytes: bytes, filename: str = "grain.jpg")
 # ---------------------------------------------------------------------------
 
 _LIVESTOCK_PROMPT = (
-    "Ты — система предварительного визуального подсчёта поголовья Tanap AI по фото (в т.ч. с дрона). "
+    "Ты — система предварительного визуального подсчёта поголовья Tanap AI для хозяйств Акмолинской области по фото (в т.ч. с дрона). "
     "Главное — аккуратно оценить число видимых животных: не пропустить настоящих и не пересчитать одно "
     "животное дважды и не принимать посторонние объекты за скот).\n\n"
     "ПРАВИЛО 1 (валидация): если на фото НЕТ животных (пустое поле, экран, интерьер, техника, только люди) — "
@@ -1005,6 +1044,8 @@ _LIVESTOCK_PROMPT = (
     "ПРАВИЛО 4 (очень плотное стадо, >60 голов): если поштучно перечислить физически невозможно, перечисли "
     "сколько сможешь по краям, а для плотной массы оцени числом по рядам×колонкам; в count_range укажи "
     "реалистичный диапазон.\n\n"
+    "ПРАВИЛО 5 (форматирование): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать звёздочки ('*', '**', '***') "
+    "и разделители из трёх тире ('---', '———') в тексте. Пиши обычным чистым текстом.\n\n"
     "Возможные виды (name_en): cattle (КРС), sheep (овцы), goat (козы), horse (лошади), pig (свиньи), "
     "camel (верблюды), poultry (птица), buffalo (буйволы/яки).\n\n"
     "Верни СТРОГО валидный JSON:\n"
@@ -1040,7 +1081,7 @@ def _livestock_unavailable(message: str) -> dict[str, Any]:
         "measurement_basis": "unavailable",
         "count_method": "unavailable",
         "count_range": "—",
-        "assessment": message,
+        "assessment": clean_agronomic_text(message),
         "recommendation": "—",
     }
 
@@ -1061,8 +1102,8 @@ def _normalize_livestock_result(parsed: dict[str, Any]) -> dict[str, Any]:
             "measurement_basis": "visual_model_count",
             "count_method": "enumerated",
             "count_range": "—",
-            "assessment": str(parsed.get("assessment") or "На фото не обнаружено скота."),
-            "recommendation": "Сфотографируйте стадо целиком при хорошем освещении или снимите сверху с дрона.",
+            "assessment": clean_agronomic_text(str(parsed.get("assessment") or "На фото не обнаружено скота.")),
+            "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "Сфотографируйте стадо целиком при хорошем освещении или снимите сверху с дрона.")),
         }
 
     # Канонические русские названия видов по name_en
@@ -1156,8 +1197,8 @@ def _normalize_livestock_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "measurement_basis": "visual_model_count",
         "count_method": "enumerated" if isinstance(raw_animals, list) and raw_animals else "dense_estimate",
         "count_range": str(parsed.get("count_range") or "").strip() or "—",
-        "assessment": str(parsed.get("assessment") or "Подсчёт поголовья выполнен."),
-        "recommendation": str(parsed.get("recommendation") or "—"),
+        "assessment": clean_agronomic_text(str(parsed.get("assessment") or "Подсчёт поголовья выполнен.")),
+        "recommendation": clean_agronomic_text(str(parsed.get("recommendation") or "—")),
     }
 
 
@@ -1212,53 +1253,53 @@ def count_livestock_in_image_bytes(image_bytes: bytes, filename: str = "herd.jpg
 
 
 # ---------------------------------------------------------------------------
-# Agronomic Chat / Q&A Engine
+# Agronomic Chat / Q&A Engine (Strictly Akmola Region, RK)
 # ---------------------------------------------------------------------------
 
 OFFLINE_KNOWLEDGE_FAQ = [
     (
         r"(ndvi|индекс|вегетаци|0\.[0-9]+|низк.*ndvi)",
-        "**Интерпретация индекса вегетации NDVI в Северном Казахстане:**\n\n"
-        "• **NDVI < 0.25 (Июнь–Июль)**: Критическое угнетение, изреженный стеблестой или сильная засуха/засоление.\n"
-        "• **NDVI 0.30 – 0.45**: Среднее развитие для богарного земледелия степной зоны. Требуется проверка очагов сорной растительности или корневых гнилей.\n"
-        "• **NDVI 0.50 – 0.75**: Оптимальное развитие биомассы яровой пшеницы в фазах колошения – налива зерна.\n"
-        "• **Резкий спад NDVI на 0.15+ за 10 дней**: Маркер стресса (заморозок, вспышка ржавчины или дефицит влаги по NDMI < 0.10)."
+        "Интерпретация индекса вегетации NDVI в Акмолинской области:\n\n"
+        "• NDVI < 0.25 (Июнь–Июль): Критическое угнетение, изреженный стеблестой или сильная засуха/засоление.\n"
+        "• NDVI 0.30 – 0.45: Среднее развитие для богарного земледелия Акмолинской области. Требуется проверка очагов сорной растительности или корневых гнилей.\n"
+        "• NDVI 0.50 – 0.75: Оптимальное развитие биомассы яровой пшеницы в фазах колошения – налива зерна.\n"
+        "• Резкий спад NDVI на 0.15+ за 10 дней: Маркер стресса (заморозок, вспышка ржавчины или дефицит влаги по NDMI < 0.10)."
     ),
     (
         r"(ржавчин|желт.*ржавчин|бурая|пустул)",
-        "**Регламент борьбы с ржавчиной (Puccinia spp.):**\n\n"
-        "1. **Экономический порог вредоносности (ЭПВ)**: 1–2 пустулы на 10% растений до колошения.\n"
-        "2. **Препараты первой линии**: Триазолы длительного действия — *Тебуконазол (250 г/л)* 0.5 л/га или смесь *Пропиконазол + Ципроконазол* 0.4 л/га.\n"
-        "3. **Сроки**: Обработка по флаговому листу защищает колос и формирует до 40% урожайности.\n"
-        "4. **Условия**: Температура не выше 22°C (утром или вечером), расход рабочей жидкости 150–200 л/га."
+        "Регламент борьбы с ржавчиной (Puccinia spp.) в Акмолинской области:\n\n"
+        "1. Экономический порог вредоносности (ЭПВ): 1–2 пустулы на 10% растений до колошения.\n"
+        "2. Препараты первой линии: Триазолы длительного действия — Тебуконазол (250 г/л) 0.5 л/га или смесь Пропиконазол + Ципроконазол 0.4 л/га по каталогу СЗР РК.\n"
+        "3. Сроки: Обработка по флаговому листу защищает колос и формирует до 40% урожайности.\n"
+        "4. Условия: Температура не выше 22°C (утром или вечером), расход рабочей жидкости 150–200 л/га."
     ),
     (
         r"(септориоз|пятнистост|пикнид)",
-        "**Защита яровой пшеницы от септориоза:**\n\n"
-        "• **Причина**: Повышенная влажность и туманы в фазы выхода в трубку – колошения.\n"
-        "• **Препараты**: Комбинация стробилурина с триазолом (*Азоксистробин + Дифеноконазол* 0.75 л/га) либо *Эпоксиконазол + Крезоксим-метил*.\n"
-        "• **Рекомендация**: При наличии пятен на 3-м сверху листе обработать всё поле, не дожидаясь перехода на флаговый лист."
+        "Защита яровой пшеницы от септориоза в условиях Акмолинской области:\n\n"
+        "• Причина: Повышенная влажность и туманы в фазы выхода в трубку – колошения.\n"
+        "• Препараты: Комбинация стробилурина с триазолом (Азоксистробин + Дифеноконазол 0.75 л/га) либо Эпоксиконазол + Крезоксим-метил.\n"
+        "• Рекомендация: При наличии пятен на 3-м сверху листе обработать всё поле, не дожидаясь перехода на флаговый лист."
     ),
     (
         r"(сорняк|осот|овсюг|вьюнок|гербицид)",
-        "**Гербицидная защита в степной зоне:**\n\n"
-        "• **Против злаковых (Овсюг, Щетинник, Просо)**: Граминициды на основе *Клодинафоп-пропаргила* (0.3–0.4 л/га) или *Феноксапроп-П-этила* в фазу 2–4 листьев сорняка.\n"
-        "• **Против двудольных (Осот, Вьюнок, Щирица)**: *2,4-Д эфир* (0.6–0.8 л/га) или *Метсульфурон-метил* (8–10 г/га) до фазы второго узла пшеницы.\n"
-        "• **Баковые смеси**: Всегда проверяйте совместимость по температуре (оптимум 15–22°C)."
+        "Гербицидная защита в степной зоне Акмолинской области:\n\n"
+        "• Против злаковых (Овсюг, Щетинник, Просо): Граминициды на основе Клодинафоп-пропаргила (0.3–0.4 л/га) или Феноксапроп-П-этила в фазу 2–4 листьев сорняка.\n"
+        "• Против двудольных (Осот, Вьюнок, Щирица): 2,4-Д эфир (0.6–0.8 л/га) или Метсульфурон-метил (8–10 г/га) до фазы второго узла пшеницы.\n"
+        "• Баковые смеси: Всегда проверяйте совместимость по температуре (оптимум 15–22°C)."
     ),
     (
         r"(удобрен|азот|селитр|карбамид|фосфор|кас)",
-        "**Система минерального питания в Акмолинской области:**\n\n"
-        "• **Основное внесение (при посеве)**: *Сульфоаммофос NP(S) 20:20(14)* или *Аммофос* в рядок 40–60 кг/га физического веса.\n"
-        "• **Листовая подкормка по вегетации**: В фазу кущения – выхода в трубку раствором *Карбамида* (10–15 кг/га) совместно с гуматами или микроэлементами (Zn, Cu).\n"
-        "• **Флаг-лист**: Некорневая азотная подкормка карбамидом (3–5% раствор) повышает содержание клейковины на 1.5–2.5%."
+        "Система минерального питания в Акмолинской области:\n\n"
+        "• Основное внесение (при посеве): Сульфоаммофос NP(S) 20:20(14) или Аммофос в рядок 40–60 кг/га физического веса.\n"
+        "• Листовая подкормка по вегетации: В фазу кущения – выхода в трубку раствором Карбамида (10–15 кг/га) совместно с гуматами или микроэлементами (Zn, Cu).\n"
+        "• Флаг-лист: Некорневая азотная подкормка карбамидом (3–5% раствор) повышает содержание клейковины на 1.5–2.5%."
     ),
     (
         r"(норма|сроки.*посев|сев|когда сеять)",
-        "**Оптимальные сроки и нормы сева (Северный Казахстан):**\n\n"
-        "• **Сроки сева мягкой яровой пшеницы**: 15–25 мая для среднеспелых сортов (Астана, Шортандинская, Шортандинская 95), 20–28 мая для раннеспелых.\n"
-        "• **Норма высева**: 2.8 – 3.4 млн всхожих зёрен/га (около 110–135 кг/га в зависимости от массы 1000 семян).\n"
-        "• **Глубина заделки**: 5–7 см (во влажный слой почвы с обязательным прикатыванием)."
+        "Оптимальные сроки и нормы сева в Акмолинской области:\n\n"
+        "• Сроки сева мягкой яровой пшеницы: 15–25 мая для среднеспелых сортов (Астана, Шортандинская, Шортандинская 95), 20–28 мая для раннеспелых.\n"
+        "• Норма высева: 2.8 – 3.4 млн всхожих зёрен/га (около 110–135 кг/га в зависимости от массы 1000 семян).\n"
+        "• Глубина заделки: 5–7 см (во влажный слой почвы с обязательным прикатыванием)."
     ),
 ]
 
@@ -1267,17 +1308,24 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
 
 AGRONOMIST_SYSTEM_PROMPT = (
-    "Ты — профессиональный ведущий AI-агроном Tanap AI для Северного и Центрального Казахстана "
-    "(Акмолинская, Костанайская, Северо-Казахстанская области).\n"
-    "Твоя задача — давать практические консультации, ясно отделяя наблюдения пользователя, расчёты и гипотезы.\n"
-    "Правила формирования ответов:\n"
-    "1. Отвечай подробно, профессионально, на русском языке, используя структурированные пункты.\n"
-    "2. Не придумывай полевые измерения, проценты поражения, урожайность, экономию, вероятность или уверенность.\n"
-    "3. По фото говори только о визуальных признаках и альтернативных причинах; диагноз требует полевого подтверждения.\n"
-    "4. Не выдавай универсальную норму СЗР или удобрения. Норма зависит от культуры, фазы, вредного объекта, "
-    "формуляции и действующей этикетки конкретного зарегистрированного препарата.\n"
-    "5. Если исходных данных недостаточно, перечисли, что нужно измерить. Любые численные ориентиры явно "
-    "помечай как справочные и проси проверить актуальный регламент Казахстана и этикетку препарата."
+    "Ты — ведущий эксперт-агроном Tanap AI, специализированный строго на сельском хозяйстве "
+    "Акмолинской области (Республика Казахстан).\n"
+    "Все рекомендации, климатические коридоры, почвенные характеристики (южные чернозёмы, темно-каштановые, "
+    "солонцеватые комплексы степной зоны), влагообеспеченность, сортовой состав (селекции НПЦЗХ им. А.И. Бараева: "
+    "Астана, Шортандинская, Шортандинская 95, Акмола и др.), оптимальные сроки сева (15–28 мая), экономические пороги "
+    "вредоносности (ЭПВ), степные сорные растения (овсюг, осот розовый и желтый, вьюнок полевой, гречишка татарская) "
+    "и регламенты защиты растений должны опираться исключительно на специфику Акмолинской области "
+    "и Государственный реестр пестицидов (СЗР), разрешенных к применению в Республике Казахстан.\n\n"
+    "СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ И СТИЛЯ:\n"
+    "1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать разделители из трёх и более тире или дефисов ('---', '———', '– – –') "
+    "и горизонтальные черты.\n"
+    "2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать звёздочки ('*', '**', '***') в тексте. Не выделяй жирным через **слово**, "
+    "пиши обычным текстом без звёздочек. Для маркированных списков используй только дефис с пробелом ('- ') или '• ', "
+    "для нумерованных — '1. ', '2. '.\n"
+    "3. Отвечай подробно, профессионально, практично, опираясь на переданные параметры хозяйства и полей.\n"
+    "4. Не придумывай непроверенные полевые замеры, урожайность или лабораторные показатели; четко отделяй "
+    "фактические параметры хозяйства от экспертных рекомендаций.\n"
+    "5. Регламенты СЗР и дозировки всегда привязывай к фазе культуры и официальной тарной этикетке зарегистрированного в РК препарата."
 )
 
 
@@ -1307,7 +1355,7 @@ def query_local_ollama(prompt: str) -> str | None:
                 if len(res_text) > 15:
                     if "1.1.1.1" in res_text or "..." in res_text[:30] or res_text.count("1.") > 10:
                         return None
-                    return res_text
+                    return clean_agronomic_text(res_text)
     except Exception:
         return None
     return None
@@ -1352,7 +1400,7 @@ def _query_gemini_chat(question: str, history: list[dict[str, Any]] | None = Non
                         data = resp.json()
                         text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                         if len(text) > 10:
-                            return text
+                            return clean_agronomic_text(text)
             except Exception:
                 continue
     except Exception:
@@ -1361,17 +1409,58 @@ def _query_gemini_chat(question: str, history: list[dict[str, Any]] | None = Non
     return None
 
 
-def ask_agronomic_advisor(question: str, history: list[dict[str, Any]] | None = None) -> str:
+def ask_agronomic_advisor(
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+    farm_context: dict[str, Any] | str | None = None,
+) -> str:
     """
-    Returns an expert agronomic answer based on regional guidelines, pathology, and field data.
-    Uses Google Gemini and fails honestly when the model is unavailable.
+    Returns an expert agronomic answer specialized strictly for Akmola region, Kazakhstan.
+    Uses Google Gemini and cleans text from markdown dividers (---) and asterisks (*).
+    Accepts full farm parameters (crops, areas, fields, statuses).
     """
-    # 1. Primary & Exclusive LLM: Google Gemini Cloud AI Cascade
-    gemini_reply = _query_gemini_chat(question, history)
-    if gemini_reply:
-        return gemini_reply
+    full_question = question.strip()
+    if farm_context:
+        if isinstance(farm_context, dict):
+            ctx_lines = ["Параметры хозяйства (Акмолинская область):"]
+            if farm_context.get("farmName"):
+                ctx_lines.append(f"- Хозяйство: {farm_context['farmName']}")
+            ctx_lines.append("- Регион: Акмолинская область")
+            if farm_context.get("totalAreaHa"):
+                ctx_lines.append(f"- Суммарная площадь: {farm_context['totalAreaHa']} га")
+            if farm_context.get("fieldsCount"):
+                ctx_lines.append(f"- Количество полей: {farm_context['fieldsCount']}")
+            if farm_context.get("cropsSummary"):
+                ctx_lines.append(f"- Культуры: {farm_context['cropsSummary']}")
+            fields = farm_context.get("fields")
+            if fields and isinstance(fields, list):
+                ctx_lines.append("- Данные по полям:")
+                for f in fields:
+                    name = f.get("name", "Поле")
+                    crop = f.get("cropType", "не указана")
+                    area = f.get("areaHa", 0)
+                    badge = f.get("badge") or f.get("status") or ""
+                    badge_str = f" | статус: {badge}" if badge else ""
+                    insp = f.get("inspectionCount")
+                    insp_str = f" | осмотров: {insp}" if insp is not None else ""
+                    ctx_lines.append(f"  • {name}: {crop}, {area} га{badge_str}{insp_str}")
+            full_question = "\n".join(ctx_lines) + f"\n\nВопрос агроному: {question.strip()}"
+        elif isinstance(farm_context, str) and farm_context.strip():
+            full_question = f"Параметры хозяйства (Акмолинская область):\n{farm_context.strip()}\n\nВопрос агроному: {question.strip()}"
 
-    return (
+    # 1. Primary & Exclusive LLM: Google Gemini Cloud AI Cascade
+    gemini_reply = _query_gemini_chat(full_question, history)
+    if gemini_reply:
+        return clean_agronomic_text(gemini_reply)
+
+    # Check regional offline FAQ if Gemini failed
+    q_lower = question.lower()
+    for pattern, answer in OFFLINE_KNOWLEDGE_FAQ:
+        if re.search(pattern, q_lower):
+            return clean_agronomic_text(answer)
+
+    return clean_agronomic_text(
         "AI-агроном сейчас недоступен. Я не буду подставлять заранее заготовленные нормы или диагнозы вместо ответа модели. "
-        "Сохраните вопрос и повторите запрос позже; срочное решение по СЗР подтвердите у агронома и по актуальной этикетке зарегистрированного препарата."
+        "Сохраните вопрос и повторите запрос позже. Срочное решение по защите культур в Акмолинской области "
+        "подтвердите у агронома и сверьте с Государственным реестром пестицидов РК."
     )

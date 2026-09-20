@@ -43,6 +43,7 @@ import {
   saveAiChatHistory,
   clearAiChatHistory,
   getAiFarmSummary,
+  cleanAiText,
 } from '../src/services/api';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { colors } from '../src/theme/colors';
@@ -50,6 +51,23 @@ import { fontFamilies } from '../src/theme/typography';
 import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage, AiFarmSummary, AiFieldBadge } from '../src/types/domain';
 
 type TabKey = 'ai_tools' | 'fields' | 'profile';
+
+export interface FarmContextData {
+  farmName: string;
+  region: string;
+  totalAreaHa: number;
+  fieldsCount: number;
+  inspectionCount: number;
+  cropsSummary: string;
+  fields: Array<{
+    id: string;
+    name: string;
+    cropType: string;
+    areaHa: number;
+    inspectionCount?: number;
+    badge?: string;
+  }>;
+}
 
 /* Typing dots animation component */
 function TypingDots() {
@@ -105,11 +123,6 @@ export default function MainScreen() {
   const [aiImmersive, setAiImmersive] = useState(false);
   // Prompt forwarded from other tabs (e.g. farm summary quick questions)
   const [externalAiPrompt, setExternalAiPrompt] = useState<string | null>(null);
-
-  const handleAskAi = useCallback((question: string) => {
-    setExternalAiPrompt(question);
-    setActiveTab('ai_tools');
-  }, []);
 
   // Instant hydration from fast memory cache (0ms perceived latency)
   const initialProfiles = getMemoryCache<FarmProfile[]>(CACHE_KEYS.PROFILES) ?? [];
@@ -212,6 +225,65 @@ export default function MainScreen() {
   const totalArea = fields.reduce((sum, field) => sum + field.areaHa, 0);
   const inspectionCount = fields.reduce((sum, field) => sum + field.inspectionCount, 0);
 
+  const farmContext = useMemo<FarmContextData | null>(() => {
+    if (!selectedProfile && fields.length === 0) return null;
+    const cropsMap: Record<string, { count: number; area: number }> = {};
+    for (const f of fields) {
+      const c = f.cropType || 'Яровая пшеница';
+      if (!cropsMap[c]) cropsMap[c] = { count: 0, area: 0 };
+      cropsMap[c].count++;
+      cropsMap[c].area += f.areaHa;
+    }
+    const cropsSummary = Object.entries(cropsMap)
+      .map(([crop, d]) => `${crop}: ${d.count} уч. (${d.area.toFixed(1)} га)`)
+      .join(', ');
+
+    return {
+      farmName: selectedProfile?.name || 'Хозяйство',
+      region: 'Акмолинская область',
+      totalAreaHa: Number(totalArea.toFixed(1)),
+      fieldsCount: fields.length,
+      inspectionCount,
+      cropsSummary,
+      fields: fields.map((f) => ({
+        id: f.id,
+        name: f.name,
+        cropType: f.cropType,
+        areaHa: f.areaHa,
+        inspectionCount: f.inspectionCount ?? 0,
+      })),
+    };
+  }, [selectedProfile, fields, totalArea, inspectionCount]);
+
+  const handleAskAi = useCallback(
+    (question: string) => {
+      let fullQuestion = question;
+      if (farmContext) {
+        const fieldsDetail =
+          farmContext.fields && farmContext.fields.length > 0
+            ? '\nДанные по участкам:\n' +
+              farmContext.fields
+                .map(
+                  (f) =>
+                    `• ${f.name}: ${f.cropType}, ${f.areaHa} га (осмотров: ${f.inspectionCount})`
+                )
+                .join('\n')
+            : '';
+        fullQuestion =
+          `Контекст хозяйства (Акмолинская область):\n` +
+          `- Хозяйство: «${farmContext.farmName}»\n` +
+          `- Регион: Акмолинская область\n` +
+          `- Площадь: ${farmContext.totalAreaHa} га (${farmContext.fieldsCount} уч.)\n` +
+          `- Осмотров проведено: ${farmContext.inspectionCount}\n` +
+          `- Структура посевов: ${farmContext.cropsSummary || 'не указана'}${fieldsDetail}\n\n` +
+          `Вопрос агроному: ${question}`;
+      }
+      setExternalAiPrompt(fullQuestion);
+      setActiveTab('ai_tools');
+    },
+    [farmContext]
+  );
+
   async function chooseProfile(profileId: string) {
     setSelectedProfileId(profileId);
     const cached = getMemoryCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(profileId));
@@ -274,6 +346,7 @@ export default function MainScreen() {
             onImmersiveChange={setAiImmersive}
             externalPrompt={externalAiPrompt}
             onClearExternalPrompt={() => setExternalAiPrompt(null)}
+            farmContext={farmContext}
           />
         </View>
 
@@ -474,11 +547,13 @@ function AiToolsView({
   onImmersiveChange,
   externalPrompt,
   onClearExternalPrompt,
+  farmContext,
 }: {
   onNavigateToFields: () => void;
   onImmersiveChange: (immersive: boolean) => void;
   externalPrompt?: string | null;
   onClearExternalPrompt?: () => void;
+  farmContext?: FarmContextData | null;
 }) {
   const insets = useSafeAreaInsets();
   const [viewMode, setViewMode] = useState<AiViewMode>('menu');
@@ -547,7 +622,7 @@ function AiToolsView({
           {
             id: 'welcome',
             sender: 'ai',
-            text: 'Здравствуйте! Я — AI-агроном Tanap AI 🌾\n\nСфотографируйте лист, вредителя или сорняк — распознаю болезни, вредителей и сорняки и дам рекомендации по обработке. Или задайте вопрос по агрономии Северного Казахстана.',
+            text: 'Здравствуйте! Я — AI-агроном Tanap AI 🌾\n\nСфотографируйте лист, вредителя или сорняк — распознаю болезни, вредителей и сорняки и дам рекомендации по обработке. Или задайте вопрос по агрономии Акмолинской области.',
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ]);
@@ -880,10 +955,35 @@ function AiToolsView({
         ? 'схема гербицидной обработки'
         : 'схема фунгицидной защиты';
     const object = diagnosis.object_name || diagnosis.diagnosis;
-    const visualShare = diagnosis.affected_area_percent != null
-      ? ` В кадре признаки занимают примерно ${diagnosis.affected_area_percent}% видимой растительной части.`
-      : '';
-    const prompt = `Какая ${kind} может рассматриваться для культуры «${diagnosis.crop}» при визуальных признаках «${object}» (${diagnosis.pathogen})?${visualShare} Укажи, что нужно проверить в поле до обработки.`;
+    const visualShare =
+      diagnosis.affected_area_percent != null
+        ? ` Доля поражения в кадре: ${diagnosis.affected_area_percent}%.`
+        : '';
+    const chemicals =
+      diagnosis.chemicals && diagnosis.chemicals !== '—'
+        ? ` Рекомендуемые действующие вещества: ${diagnosis.chemicals}.`
+        : '';
+    const rate =
+      diagnosis.rate && diagnosis.rate !== '—'
+        ? ` Норма расхода: ${diagnosis.rate}.`
+        : '';
+    const weather =
+      diagnosis.weather_limits && diagnosis.weather_limits !== '—'
+        ? ` Агрометеоокно: ${diagnosis.weather_limits}.`
+        : '';
+
+    const prompt =
+      `Параметры фото-диагностики (Акмолинская область):\n` +
+      `- Культура: ${diagnosis.crop}\n` +
+      `- Выявленный объект: ${object}\n` +
+      `- Возбудитель/причина: ${diagnosis.pathogen}\n` +
+      `- Категория: ${diagnosis.category} | Степень: ${diagnosis.severity}\n` +
+      `${visualShare ? `- ${visualShare.trim()}\n` : ''}` +
+      `${chemicals ? `- ${chemicals.trim()}\n` : ''}` +
+      `${rate ? `- ${rate.trim()}\n` : ''}` +
+      `${weather ? `- ${weather.trim()}\n` : ''}\n` +
+      `Вопрос агроному: Какая ${kind} рекомендуется по регламентам СЗР в почвенно-климатических условиях Акмолинской области и что обязательно проверить в поле перед обработкой?`;
+
     setViewMode('chat');
     handleSendMessage(prompt);
   };
@@ -909,11 +1009,11 @@ function AiToolsView({
     try {
       // Only send last 10 messages as context to reduce payload and latency
       const recentHistory = nextMessages.slice(-10);
-      const answer = await askAiAgronomist(q, recentHistory);
+      const answer = await askAiAgronomist(q, recentHistory, farmContext);
       const aiMsg: AiChatMessage = {
         id: `ai_${Date.now()}`,
         sender: 'ai',
-        text: answer,
+        text: cleanAiText(answer),
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       const updatedMessages = [...nextMessages, aiMsg];
@@ -1005,7 +1105,7 @@ function AiToolsView({
             ]}
             selectable
           >
-            {msg.text}
+            {cleanAiText(msg.text)}
           </Text>
           <Text
             style={[
@@ -1111,7 +1211,7 @@ function AiToolsView({
           <View style={{ flex: 1, gap: 3 }}>
             <Text style={styles.aiMenuCardTitle}>AI Агроном</Text>
             <Text style={styles.aiMenuCardDesc}>
-              Чат-консультант по агрономии Северного Казахстана: болезни, СЗР, сроки, нормы.
+              Чат-консультант по агрономии Акмолинской области: болезни, СЗР, сроки, нормы.
             </Text>
           </View>
           <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
@@ -2019,7 +2119,7 @@ function AiFarmDigestCard({
           </View>
         ) : summary ? (
           <>
-            <Text style={styles.aiDigestText}>{summary.summaryText}</Text>
+            <Text style={styles.aiDigestText}>{cleanAiText(summary.summaryText)}</Text>
             {summary.cropsSummary ? (
               <View style={styles.aiDigestMetaRow}>
                 <AppIcon name="leaf" size={12} color="#2E7D32" />

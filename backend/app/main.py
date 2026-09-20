@@ -48,6 +48,7 @@ from .ai_advisor import (
     analyze_crop_image_bytes,
     analyze_grain_quality_bytes,
     ask_agronomic_advisor,
+    clean_agronomic_text,
     count_livestock_in_image_bytes,
     count_seedlings_in_image_bytes,
     count_seedlings_in_video_bytes,
@@ -574,7 +575,7 @@ async def get_profile_ai_summary(
     profile = profile_from_row(profile_row)
     fields = [field_from_row(row) for row in rows]
     farm_name = profile["name"]
-    region = profile.get("region") or "Акмолинская область"
+    region = "Акмолинская область"
 
     if not fields:
         res = {
@@ -585,7 +586,7 @@ async def get_profile_ai_summary(
             "totalAreaHa": 0.0,
             "fieldsCount": 0,
             "cropsSummary": "Нет участков",
-            "summaryText": f"В хозяйстве «{farm_name}» пока нет добавленных полей. Добавьте контур поля для запуска спутникового мониторинга Sentinel-2 и генерации рекомендаций AI-агронома.",
+            "summaryText": f"В хозяйстве «{farm_name}» (Акмолинская область) пока нет добавленных полей. Добавьте контур поля для запуска спутникового мониторинга Sentinel-2 и генерации рекомендаций AI-агронома.",
             "quickQuestions": [],
             "fieldBadges": {},
             "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -643,19 +644,22 @@ async def get_profile_ai_summary(
             }
 
     prompt = (
-        f"Ты ведущий AI-агроном Tanap AI. Составь краткую оперативную агросводку ровно в 2-3 предложения "
-        f"для главного агронома хозяйства «{farm_name}» ({region}).\n"
+        f"Ты ведущий AI-агроном Tanap AI для Акмолинской области (Республика Казахстан). Составь краткую оперативную агросводку ровно в 2-3 предложения "
+        f"для главного агронома хозяйства «{farm_name}» (Акмолинская область).\n"
         f"Параметры хозяйства:\n"
         f"- Полей в обороте: {fields_count}, суммарная площадь: {total_area_ha} га.\n"
         f"- Структура посевов: {crops_summary}.\n"
-        f"- Текущий сезон: мониторинг налива зерна, подготовка к уборочной кампании и контроль дефицита влаги в Северном Казахстане.\n"
-        f"Требования: дай строго 2-3 лаконичных предложения о фитосанитарном состоянии, рекомендуемом порядке полевых обходов и готовности к работам. "
-        f"Без вводных формул вежливости, без общих фраз и без выдуманных лабораторных анализов."
+        f"- Регион: Акмолинская область (Северный Казахстан).\n"
+        f"- Задачи: фитосанитарный контроль, оценка запасов продуктивной почвенной влаги и готовность к полевым работам.\n"
+        f"СТРОГИЕ ПРАВИЛА: Категорически запрещено использовать разделители из трёх тире ('---', '———') и звёздочки ('*') в тексте. "
+        f"Дай строго 2-3 лаконичных предложения чистым текстом без звёздочек, без тире-разделителей и без вводных формул вежливости."
     )
 
     summary_text = None
     try:
-        summary_text = await run_in_threadpool(_query_gemini_chat, prompt)
+        raw_summary = await run_in_threadpool(_query_gemini_chat, prompt)
+        if raw_summary:
+            summary_text = clean_agronomic_text(raw_summary)
     except Exception:
         summary_text = None
 
@@ -663,9 +667,11 @@ async def get_profile_ai_summary(
         main_crop = list(crops_map.keys())[0] if crops_map else "зерновые культуры"
         summary_text = (
             f"По хозяйству «{farm_name}» ({total_area_ha} га, {fields_count} уч.) основной массив занят культурой {main_crop}. "
-            f"Рекомендуется провести первоочередной осмотр участков с признаками неоднородности вегетации для оценки влажности зерна и сорняков. "
-            f"Ближайшие погодные условия благоприятны для завершения защитных мероприятий и подготовки уборочной техники."
+            f"Рекомендуется провести первоочередной осмотр участков с признаками неоднородности вегетации для оценки запасов влаги и засоренности в степной зоне Акмолинской области. "
+            f"Ближайшие погодные условия благоприятны для мониторинга посевов и фитосанитарного контроля."
         )
+
+    summary_text = clean_agronomic_text(summary_text)
 
     quick_questions = [
         "Какое поле обследовать в первую очередь?",
@@ -1336,11 +1342,12 @@ async def ai_count_livestock(request: Request) -> dict:
 class AiChatInput(BaseModel):
     question: str
     history: list[dict] | None = None
+    farm_context: dict[str, Any] | str | None = None
 
 
 @app.post("/api/ai/chat")
 def ai_agronomic_chat(input_data: AiChatInput) -> dict:
     if not input_data.question.strip():
         raise HTTPException(status_code=422, detail="Введите вопрос агроному")
-    answer = ask_agronomic_advisor(input_data.question, input_data.history)
+    answer = ask_agronomic_advisor(input_data.question, input_data.history, input_data.farm_context)
     return {"question": input_data.question, "answer": answer}

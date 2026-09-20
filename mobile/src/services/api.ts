@@ -184,14 +184,40 @@ export const CACHE_KEYS = {
   AI_FARM_SUMMARY: (profileId: string) => `ai_farm_summary_v1_${profileId}`,
 };
 
+export function cleanAiText(text: string): string {
+  if (!text) return '';
+  let cleaned = text;
+  // Remove markdown horizontal rules (---, ———, – – –, ***, ___)
+  cleaned = cleaned.replace(/^[\s\t]*[-—–_*]{2,}[\s\t]*$/gm, '');
+  // Remove inline 3+ dashes / hyphens / em-dashes
+  cleaned = cleaned.replace(/[-—–]{3,}/g, '');
+  // Remove bold/italic markdown asterisks: ***text*** -> text, **text** -> text, *text* -> text
+  cleaned = cleaned.replace(/\*{3}(.*?)\*{3}/g, '$1');
+  cleaned = cleaned.replace(/\*{2}(.*?)\*{2}/g, '$1');
+  cleaned = cleaned.replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1');
+  // Convert bullet asterisks to clean bullets
+  cleaned = cleaned.replace(/^[\s\t]*\*\s+/gm, '• ');
+  // Remove any remaining asterisks
+  cleaned = cleaned.replace(/\*/g, '');
+  // Collapse excessive newlines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
+}
+
 export async function getAiFarmSummary(profileId: string, refresh = false): Promise<AiFarmSummary> {
   const cacheKey = CACHE_KEYS.AI_FARM_SUMMARY(profileId);
   if (!refresh) {
     const cached = await getLocalCache<AiFarmSummary>(cacheKey);
     if (cached) {
+      if (cached.summaryText) {
+        cached.summaryText = cleanAiText(cached.summaryText);
+      }
       // Return cached immediately and refresh in background
       apiFetch<AiFarmSummary>(`/api/profiles/${encodeURIComponent(profileId)}/ai-summary`)
-        .then((fresh) => void saveLocalCache(cacheKey, fresh))
+        .then((fresh) => {
+          if (fresh.summaryText) fresh.summaryText = cleanAiText(fresh.summaryText);
+          void saveLocalCache(cacheKey, fresh);
+        })
         .catch(() => {});
       return cached;
     }
@@ -199,11 +225,17 @@ export async function getAiFarmSummary(profileId: string, refresh = false): Prom
   try {
     const url = `/api/profiles/${encodeURIComponent(profileId)}/ai-summary${refresh ? '?refresh=true' : ''}`;
     const data = await apiFetch<AiFarmSummary>(url);
+    if (data.summaryText) {
+      data.summaryText = cleanAiText(data.summaryText);
+    }
     void saveLocalCache(cacheKey, data);
     return data;
   } catch (err) {
     const cached = await getLocalCache<AiFarmSummary>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      if (cached.summaryText) cached.summaryText = cleanAiText(cached.summaryText);
+      return cached;
+    }
     throw err;
   }
 }
@@ -571,7 +603,7 @@ export async function diagnoseCropPhoto(
   photoName = 'photo.jpg'
 ): Promise<AiDiagnosisResult> {
   const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
-  return apiFetch<AiDiagnosisResult>(
+  const res = await apiFetch<AiDiagnosisResult>(
     '/api/ai/diagnose-photo',
     {
       method: 'POST',
@@ -581,6 +613,17 @@ export async function diagnoseCropPhoto(
     35_000,
     1 // retry once on failure
   );
+  if (res) {
+    if (res.object_name) res.object_name = cleanAiText(res.object_name);
+    if (res.crop) res.crop = cleanAiText(res.crop);
+    if (res.diagnosis) res.diagnosis = cleanAiText(res.diagnosis);
+    if (res.description) res.description = cleanAiText(res.description);
+    if (res.recommendation) res.recommendation = cleanAiText(res.recommendation);
+    if (res.chemicals) res.chemicals = cleanAiText(res.chemicals);
+    if (res.rate) res.rate = cleanAiText(res.rate);
+    if (res.weather_limits) res.weather_limits = cleanAiText(res.weather_limits);
+  }
+  return res;
 }
 
 export async function countSeedlingsPhoto(
@@ -589,7 +632,7 @@ export async function countSeedlingsPhoto(
   frameAreaM2?: number
 ): Promise<AiStandCountResult> {
   const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
-  return apiFetch<AiStandCountResult>(
+  const res = await apiFetch<AiStandCountResult>(
     '/api/ai/count-seedlings',
     {
       method: 'POST',
@@ -603,6 +646,12 @@ export async function countSeedlingsPhoto(
     35_000,
     1 // retry once on failure
   );
+  if (res) {
+    if (res.crop) res.crop = cleanAiText(res.crop);
+    if (res.assessment) res.assessment = cleanAiText(res.assessment);
+    if (res.recommendation) res.recommendation = cleanAiText(res.recommendation);
+  }
+  return res;
 }
 
 export async function countLivestock(
@@ -610,7 +659,7 @@ export async function countLivestock(
   photoName = 'herd.jpg'
 ): Promise<AiLivestockResult> {
   const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
-  return apiFetch<AiLivestockResult>(
+  const res = await apiFetch<AiLivestockResult>(
     '/api/ai/count-livestock',
     {
       method: 'POST',
@@ -620,6 +669,12 @@ export async function countLivestock(
     40_000,
     1
   );
+  if (res) {
+    if (res.dominant_species) res.dominant_species = cleanAiText(res.dominant_species);
+    if (res.assessment) res.assessment = cleanAiText(res.assessment);
+    if (res.recommendation) res.recommendation = cleanAiText(res.recommendation);
+  }
+  return res;
 }
 
 export async function analyzeGrainQuality(
@@ -627,7 +682,7 @@ export async function analyzeGrainQuality(
   photoName = 'grain.jpg'
 ): Promise<AiGrainQualityResult> {
   const cleanBase64 = photoBase64.includes(',') ? photoBase64.split(',')[1] : photoBase64;
-  return apiFetch<AiGrainQualityResult>(
+  const res = await apiFetch<AiGrainQualityResult>(
     '/api/ai/grain-quality',
     {
       method: 'POST',
@@ -637,6 +692,12 @@ export async function analyzeGrainQuality(
     35_000,
     1
   );
+  if (res) {
+    if (res.crop) res.crop = cleanAiText(res.crop);
+    if (res.assessment) res.assessment = cleanAiText(res.assessment);
+    if (res.recommendation) res.recommendation = cleanAiText(res.recommendation);
+  }
+  return res;
 }
 
 export async function countSeedlingsVideoFrames(
@@ -645,7 +706,7 @@ export async function countSeedlingsVideoFrames(
   frameAreaM2?: number
 ): Promise<AiStandCountResult> {
   const frames = frameBase64.map((f) => (f.includes(',') ? f.split(',')[1] : f));
-  return apiFetch<AiStandCountResult>(
+  const res = await apiFetch<AiStandCountResult>(
     '/api/ai/count-seedlings',
     {
       method: 'POST',
@@ -659,15 +720,22 @@ export async function countSeedlingsVideoFrames(
     45_000,
     0
   );
+  if (res) {
+    if (res.crop) res.crop = cleanAiText(res.crop);
+    if (res.assessment) res.assessment = cleanAiText(res.assessment);
+    if (res.recommendation) res.recommendation = cleanAiText(res.recommendation);
+  }
+  return res;
 }
 
 export async function askAiAgronomist(
   question: string,
-  history?: AiChatMessage[]
+  history?: AiChatMessage[],
+  farmContext?: any
 ): Promise<string> {
   const historyPayload = history?.slice(-10).map((m) => ({
     role: m.sender === 'user' ? 'user' : 'model',
-    text: m.text,
+    text: cleanAiText(m.text),
   }));
 
   const res = await apiFetch<{ question: string; answer: string }>(
@@ -675,13 +743,17 @@ export async function askAiAgronomist(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, history: historyPayload }),
+      body: JSON.stringify({
+        question,
+        history: historyPayload,
+        farm_context: farmContext,
+      }),
     },
     35_000,
     1 // retry once on failure
   );
 
-  return res.answer;
+  return cleanAiText(res.answer);
 }
 
 export async function loadAiChatHistory(): Promise<AiChatMessage[]> {
