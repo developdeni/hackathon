@@ -277,3 +277,56 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["meanNdvi"], 0.25)
         self.assertEqual(len(result["cells"]), 2)
         self.assertAlmostEqual(result["coveragePercent"], 66.7)
+
+    def test_clean_agronomic_text_strips_asterisks_and_triple_dashes(self):
+        raw = "--- \n**Рекомендация:**\n* Внести карбамид\n---\n*Норма:* 15 кг/га"
+        cleaned = ai_advisor.clean_agronomic_text(raw)
+        self.assertNotIn("---", cleaned)
+        self.assertNotIn("*", cleaned)
+        self.assertIn("• Внести карбамид", cleaned)
+        self.assertIn("Норма: 15 кг/га", cleaned)
+
+    def test_format_hidden_farm_context_includes_coordinates_and_weather(self):
+        ctx = {
+            "farmName": "Бараев Агро",
+            "coordinates": {"latitude": 51.65, "longitude": 71.30},
+            "fields": [
+                {
+                    "name": "Поле №1",
+                    "cropType": "Яровая пшеница",
+                    "areaHa": 250.0,
+                    "coordinates": {"latitude": 51.648, "longitude": 71.295},
+                }
+            ],
+            "weather": {
+                "current": {"temperature": 18.5, "humidity": 55, "windSpeed": 3.2},
+                "forecast7d": {"maxTemp": 22.0, "minTemp": 5.0, "precipSum": 1.2, "waterBalance": -15.4},
+            },
+        }
+        hidden = ai_advisor.format_hidden_farm_context(ctx)
+        self.assertIn("51.6500°N, 71.3000°E", hidden)
+        self.assertIn("Поле №1", hidden)
+        self.assertIn("температура +18.5°C", hidden)
+        self.assertIn("баланс влаги -15.4 мм", hidden)
+
+    async def test_ai_agronomic_chat_enriches_missing_weather_and_coordinates(self):
+        input_data = main.AiChatInput(
+            question="Хватит ли влаги на посев?",
+            farm_context={"farmName": "Тест"},
+        )
+        fake_weather = {
+            "status": "ok",
+            "current": {"temperature": 15.0, "humidity": 60, "windSpeed": 2.5},
+            "forecast7d": {"maxTemp": 20.0, "minTemp": 4.0, "precipSum": 0.5, "waterBalance": -14.0},
+        }
+        with patch.object(main, "get_field_agro_weather", AsyncMock(return_value=fake_weather)):
+            with patch.object(main, "ask_agronomic_advisor", return_value="Ответ агронома по влаге") as mock_ask:
+                res = await main.ai_agronomic_chat(input_data)
+                self.assertEqual(res["question"], "Хватит ли влаги на посев?")
+                self.assertEqual(res["answer"], "Ответ агронома по влаге")
+                # Verify that farm_context was automatically enriched with Akmola coordinates and live weather
+                passed_ctx = mock_ask.call_args[0][2]
+                self.assertEqual(passed_ctx["coordinates"]["latitude"], 51.65)
+                self.assertEqual(passed_ctx["coordinates"]["longitude"], 71.30)
+                self.assertEqual(passed_ctx["weather"], fake_weather)
+

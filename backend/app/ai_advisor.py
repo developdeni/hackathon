@@ -1361,10 +1361,112 @@ def query_local_ollama(prompt: str) -> str | None:
     return None
 
 
-def _query_gemini_chat(question: str, history: list[dict[str, Any]] | None = None) -> str | None:
+def format_hidden_farm_context(farm_context: Any) -> str:
+    """
+    Formats complete farm territory parameters, field coordinates, and live Open-Meteo weather
+    into a hidden background system context for Gemini. Never leaks into user message history.
+    """
+    if not farm_context:
+        return ""
+    if isinstance(farm_context, str):
+        return farm_context.strip()
+    if not isinstance(farm_context, dict):
+        return ""
+
+    lines = ["СВЕДЕНИЯ О ХОЗЯЙСТВЕ, КООРДИНАТАХ И ОПЕРАТИВНОЙ ПОГОДЕ (АКМОЛИНСКАЯ ОБЛАСТЬ):"]
+    farm_name = farm_context.get("farmName")
+    if farm_name:
+        lines.append(f"- Наименование хозяйства: «{farm_name}»")
+    lines.append("- Регион: Акмолинская область (Республика Казахстан)")
+
+    coords = farm_context.get("coordinates")
+    if coords and isinstance(coords, dict):
+        lat = coords.get("latitude")
+        lon = coords.get("longitude")
+        if lat is not None and lon is not None:
+            lines.append(f"- Географические координаты территории: {float(lat):.4f}°N, {float(lon):.4f}°E")
+
+    if farm_context.get("totalAreaHa"):
+        lines.append(f"- Суммарная площадь пашни: {farm_context['totalAreaHa']} га")
+    if farm_context.get("fieldsCount"):
+        lines.append(f"- Количество полей в обороте: {farm_context['fieldsCount']}")
+    if farm_context.get("cropsSummary"):
+        lines.append(f"- Структура посевов: {farm_context['cropsSummary']}")
+
+    fields = farm_context.get("fields")
+    if fields and isinstance(fields, list):
+        lines.append("- Картотека участков и координат:")
+        for f in fields:
+            name = f.get("name", "Поле")
+            crop = f.get("cropType", "не указана")
+            area = f.get("areaHa", 0)
+            c = f.get("coordinates")
+            c_str = f" (центр: {c['latitude']:.4f}°N, {c['longitude']:.4f}°E)" if (isinstance(c, dict) and c.get("latitude") and c.get("longitude")) else ""
+            badge = f.get("badge") or f.get("status") or ""
+            badge_str = f" | статус: {badge}" if badge else ""
+            insp = f.get("inspectionCount")
+            insp_str = f" | осмотров: {insp}" if insp is not None else ""
+            lines.append(f"  • {name}: {crop}, {area} га{c_str}{badge_str}{insp_str}")
+
+    weather = farm_context.get("weather")
+    if weather and isinstance(weather, dict):
+        lines.append("- Оперативный метеопрогноз Open-Meteo по координатам территории (Акмолинская область):")
+        cur = weather.get("current")
+        if cur and isinstance(cur, dict):
+            t = cur.get("temperature")
+            h = cur.get("humidity")
+            w = cur.get("windSpeed")
+            t_str = f"температура {t:+.1f}°C" if t is not None else ""
+            h_str = f"влажность {h:.0f}%" if h is not None else ""
+            w_str = f"ветер {w:.1f} м/с (окно для СЗР открыто при ветре < 4 м/с)" if w is not None else ""
+            info_cur = ", ".join(filter(None, [t_str, h_str, w_str]))
+            if info_cur:
+                lines.append(f"  • Текущие условия: {info_cur}")
+        fc = weather.get("forecast7d")
+        if fc and isinstance(fc, dict):
+            max_t = fc.get("maxTemp")
+            min_t = fc.get("minTemp")
+            precip = fc.get("precipSum")
+            wb = fc.get("waterBalance")
+            lines.append(f"  • Прогноз на 7 дней: дневные до {max_t:+.1f}°C, ночные минимумы {min_t:+.1f}°C, сумма осадков {precip:.1f} мм, баланс влаги {wb:+.1f} мм")
+        alerts = weather.get("alerts")
+        if alerts and isinstance(alerts, list):
+            for a in alerts:
+                if isinstance(a, dict) and a.get("title"):
+                    lines.append(f"  • Метео-предупреждение: {a['title']} ({a.get('description', '')})")
+
+    diag = farm_context.get("diagnosis")
+    if diag and isinstance(diag, dict):
+        lines.append("- Параметры фото-диагностики растения:")
+        if diag.get("crop"):
+            lines.append(f"  • Культура: {diag['crop']}")
+        if diag.get("object_name"):
+            lines.append(f"  • Выявленный объект: {diag['object_name']}")
+        if diag.get("pathogen"):
+            lines.append(f"  • Возбудитель/причина: {diag['pathogen']}")
+        if diag.get("severity"):
+            lines.append(f"  • Степень: {diag['severity']}")
+        if diag.get("affected_area_percent") is not None:
+            lines.append(f"  • Доля поражения в кадре: {diag['affected_area_percent']}%")
+        if diag.get("chemicals"):
+            lines.append(f"  • Рекомендуемые действующие вещества: {diag['chemicals']}")
+        if diag.get("rate"):
+            lines.append(f"  • Норма расхода: {diag['rate']}")
+        if diag.get("weather_limits"):
+            lines.append(f"  • Агрометеоокно: {diag['weather_limits']}")
+
+    return "\n".join(lines)
+
+
+def _query_gemini_chat(
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+    system_context: str | None = None,
+) -> str | None:
     """
     Queries Google Gemini for expert agronomic advice with automatic model fallback.
-    Uses high-speed multimodal models without unsupported thinking budgets.
+    Injects territory coordinates, field catalog, and live weather secretly into systemInstruction.
+    The user question and history remain completely clean without context clutter.
     """
     if not GEMINI_API_KEY:
         return None
@@ -1378,12 +1480,17 @@ def _query_gemini_chat(question: str, history: list[dict[str, Any]] | None = Non
                 if text:
                     contents.append({"role": role, "parts": [{"text": text}]})
 
+        # The user message contains ONLY the clean user question
         contents.append({"role": "user", "parts": [{"text": question.strip()}]})
+
+        system_instruction_text = AGRONOMIST_SYSTEM_PROMPT
+        if system_context and system_context.strip():
+            system_instruction_text += "\n\n" + system_context.strip()
 
         payload = {
             "contents": contents,
             "systemInstruction": {
-                "parts": [{"text": AGRONOMIST_SYSTEM_PROMPT}]
+                "parts": [{"text": system_instruction_text}]
             },
             "generationConfig": {
                 "temperature": 0.3,
@@ -1417,39 +1524,13 @@ def ask_agronomic_advisor(
     """
     Returns an expert agronomic answer specialized strictly for Akmola region, Kazakhstan.
     Uses Google Gemini and cleans text from markdown dividers (---) and asterisks (*).
-    Accepts full farm parameters (crops, areas, fields, statuses).
+    Accepts full farm parameters (crops, areas, fields, statuses, coordinates, weather)
+    and passes them hiddenly into systemInstruction without polluting user questions or chat SMS history.
     """
-    full_question = question.strip()
-    if farm_context:
-        if isinstance(farm_context, dict):
-            ctx_lines = ["Параметры хозяйства (Акмолинская область):"]
-            if farm_context.get("farmName"):
-                ctx_lines.append(f"- Хозяйство: {farm_context['farmName']}")
-            ctx_lines.append("- Регион: Акмолинская область")
-            if farm_context.get("totalAreaHa"):
-                ctx_lines.append(f"- Суммарная площадь: {farm_context['totalAreaHa']} га")
-            if farm_context.get("fieldsCount"):
-                ctx_lines.append(f"- Количество полей: {farm_context['fieldsCount']}")
-            if farm_context.get("cropsSummary"):
-                ctx_lines.append(f"- Культуры: {farm_context['cropsSummary']}")
-            fields = farm_context.get("fields")
-            if fields and isinstance(fields, list):
-                ctx_lines.append("- Данные по полям:")
-                for f in fields:
-                    name = f.get("name", "Поле")
-                    crop = f.get("cropType", "не указана")
-                    area = f.get("areaHa", 0)
-                    badge = f.get("badge") or f.get("status") or ""
-                    badge_str = f" | статус: {badge}" if badge else ""
-                    insp = f.get("inspectionCount")
-                    insp_str = f" | осмотров: {insp}" if insp is not None else ""
-                    ctx_lines.append(f"  • {name}: {crop}, {area} га{badge_str}{insp_str}")
-            full_question = "\n".join(ctx_lines) + f"\n\nВопрос агроному: {question.strip()}"
-        elif isinstance(farm_context, str) and farm_context.strip():
-            full_question = f"Параметры хозяйства (Акмолинская область):\n{farm_context.strip()}\n\nВопрос агроному: {question.strip()}"
+    hidden_system_context = format_hidden_farm_context(farm_context)
 
     # 1. Primary & Exclusive LLM: Google Gemini Cloud AI Cascade
-    gemini_reply = _query_gemini_chat(full_question, history)
+    gemini_reply = _query_gemini_chat(question.strip(), history, hidden_system_context)
     if gemini_reply:
         return clean_agronomic_text(gemini_reply)
 

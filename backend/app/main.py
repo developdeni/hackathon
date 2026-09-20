@@ -1347,8 +1347,62 @@ class AiChatInput(BaseModel):
 
 
 @app.post("/api/ai/chat")
-def ai_agronomic_chat(input_data: AiChatInput) -> dict:
+async def ai_agronomic_chat(input_data: AiChatInput) -> dict:
     if not input_data.question.strip():
         raise HTTPException(status_code=422, detail="Введите вопрос агроному")
-    answer = ask_agronomic_advisor(input_data.question, input_data.history, input_data.farm_context)
+
+    farm_ctx: dict[str, Any] = {}
+    if isinstance(input_data.farm_context, dict):
+        farm_ctx = dict(input_data.farm_context)
+    elif isinstance(input_data.farm_context, str) and input_data.farm_context.strip():
+        farm_ctx = {"raw_text": input_data.farm_context.strip()}
+
+    # Resolve coordinates for Akmola territory
+    lat: float | None = None
+    lon: float | None = None
+
+    coords = farm_ctx.get("coordinates")
+    if isinstance(coords, dict):
+        try:
+            if coords.get("latitude") is not None and coords.get("longitude") is not None:
+                lat = float(coords["latitude"])
+                lon = float(coords["longitude"])
+        except (ValueError, TypeError):
+            pass
+
+    if (lat is None or lon is None) and isinstance(farm_ctx.get("fields"), list) and farm_ctx["fields"]:
+        for f in farm_ctx["fields"]:
+            if isinstance(f, dict):
+                f_coords = f.get("coordinates")
+                if isinstance(f_coords, dict):
+                    try:
+                        if f_coords.get("latitude") is not None and f_coords.get("longitude") is not None:
+                            lat = float(f_coords["latitude"])
+                            lon = float(f_coords["longitude"])
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+    # Default Akmola Region agronomic coordinates (НПЦЗХ им. А.И. Бараева, Шортанды / Акколь)
+    if lat is None or lon is None:
+        lat = 51.6500
+        lon = 71.3000
+        farm_ctx["coordinates"] = {"latitude": lat, "longitude": lon}
+
+    # Automatically fetch live weather for the territory if not already provided
+    if not farm_ctx.get("weather"):
+        try:
+            weather_data = await get_field_agro_weather(lat, lon)
+            if weather_data and weather_data.get("status") in ["ok", "cached"]:
+                farm_ctx["weather"] = weather_data
+        except Exception:
+            pass
+
+    answer = await run_in_threadpool(
+        ask_agronomic_advisor,
+        input_data.question,
+        input_data.history,
+        farm_ctx,
+    )
     return {"question": input_data.question, "answer": answer}
+

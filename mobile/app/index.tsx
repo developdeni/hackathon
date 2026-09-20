@@ -59,6 +59,10 @@ export interface FarmContextData {
   fieldsCount: number;
   inspectionCount: number;
   cropsSummary: string;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
   fields: Array<{
     id: string;
     name: string;
@@ -66,8 +70,15 @@ export interface FarmContextData {
     areaHa: number;
     inspectionCount?: number;
     badge?: string;
+    coordinates?: {
+      latitude: number;
+      longitude: number;
+    };
   }>;
+  diagnosis?: any;
+  weather?: any;
 }
+
 
 /* Typing dots animation component */
 function TypingDots() {
@@ -228,6 +239,10 @@ export default function MainScreen() {
   const farmContext = useMemo<FarmContextData | null>(() => {
     if (!selectedProfile && fields.length === 0) return null;
     const cropsMap: Record<string, { count: number; area: number }> = {};
+    let totalLats = 0;
+    let totalLons = 0;
+    let coordPointsCount = 0;
+
     for (const f of fields) {
       const c = f.cropType || 'Яровая пшеница';
       if (!cropsMap[c]) cropsMap[c] = { count: 0, area: 0 };
@@ -238,50 +253,59 @@ export default function MainScreen() {
       .map(([crop, d]) => `${crop}: ${d.count} уч. (${d.area.toFixed(1)} га)`)
       .join(', ');
 
-    return {
-      farmName: selectedProfile?.name || 'Хозяйство',
-      region: 'Акмолинская область',
-      totalAreaHa: Number(totalArea.toFixed(1)),
-      fieldsCount: fields.length,
-      inspectionCount,
-      cropsSummary,
-      fields: fields.map((f) => ({
+    const fieldsData = fields.map((f) => {
+      let fieldCenter: { latitude: number; longitude: number } | undefined;
+      if (f.boundary && f.boundary.length > 0) {
+        let sumLat = 0;
+        let sumLon = 0;
+        for (const pt of f.boundary) {
+          sumLat += pt.latitude;
+          sumLon += pt.longitude;
+        }
+        fieldCenter = {
+          latitude: Number((sumLat / f.boundary.length).toFixed(4)),
+          longitude: Number((sumLon / f.boundary.length).toFixed(4)),
+        };
+        totalLats += sumLat;
+        totalLons += sumLon;
+        coordPointsCount += f.boundary.length;
+      }
+      return {
         id: f.id,
         name: f.name,
         cropType: f.cropType,
         areaHa: f.areaHa,
         inspectionCount: f.inspectionCount ?? 0,
-      })),
+        coordinates: fieldCenter,
+      };
+    });
+
+    const farmCoords =
+      coordPointsCount > 0
+        ? {
+            latitude: Number((totalLats / coordPointsCount).toFixed(4)),
+            longitude: Number((totalLons / coordPointsCount).toFixed(4)),
+          }
+        : { latitude: 51.6500, longitude: 71.3000 };
+
+    return {
+      farmName: selectedProfile?.name || 'Хозяйство',
+      region: 'Акмолинская область',
+      coordinates: farmCoords,
+      totalAreaHa: Number(totalArea.toFixed(1)),
+      fieldsCount: fields.length,
+      inspectionCount,
+      cropsSummary,
+      fields: fieldsData,
     };
   }, [selectedProfile, fields, totalArea, inspectionCount]);
 
   const handleAskAi = useCallback(
     (question: string) => {
-      let fullQuestion = question;
-      if (farmContext) {
-        const fieldsDetail =
-          farmContext.fields && farmContext.fields.length > 0
-            ? '\nДанные по участкам:\n' +
-              farmContext.fields
-                .map(
-                  (f) =>
-                    `• ${f.name}: ${f.cropType}, ${f.areaHa} га (осмотров: ${f.inspectionCount})`
-                )
-                .join('\n')
-            : '';
-        fullQuestion =
-          `Контекст хозяйства (Акмолинская область):\n` +
-          `- Хозяйство: «${farmContext.farmName}»\n` +
-          `- Регион: Акмолинская область\n` +
-          `- Площадь: ${farmContext.totalAreaHa} га (${farmContext.fieldsCount} уч.)\n` +
-          `- Осмотров проведено: ${farmContext.inspectionCount}\n` +
-          `- Структура посевов: ${farmContext.cropsSummary || 'не указана'}${fieldsDetail}\n\n` +
-          `Вопрос агроному: ${question}`;
-      }
-      setExternalAiPrompt(fullQuestion);
+      setExternalAiPrompt(question.trim());
       setActiveTab('ai_tools');
     },
-    [farmContext]
+    []
   );
 
   async function chooseProfile(profileId: string) {
@@ -955,40 +979,28 @@ function AiToolsView({
         ? 'схема гербицидной обработки'
         : 'схема фунгицидной защиты';
     const object = diagnosis.object_name || diagnosis.diagnosis;
-    const visualShare =
-      diagnosis.affected_area_percent != null
-        ? ` Доля поражения в кадре: ${diagnosis.affected_area_percent}%.`
-        : '';
-    const chemicals =
-      diagnosis.chemicals && diagnosis.chemicals !== '—'
-        ? ` Рекомендуемые действующие вещества: ${diagnosis.chemicals}.`
-        : '';
-    const rate =
-      diagnosis.rate && diagnosis.rate !== '—'
-        ? ` Норма расхода: ${diagnosis.rate}.`
-        : '';
-    const weather =
-      diagnosis.weather_limits && diagnosis.weather_limits !== '—'
-        ? ` Агрометеоокно: ${diagnosis.weather_limits}.`
-        : '';
 
-    const prompt =
-      `Параметры фото-диагностики (Акмолинская область):\n` +
-      `- Культура: ${diagnosis.crop}\n` +
-      `- Выявленный объект: ${object}\n` +
-      `- Возбудитель/причина: ${diagnosis.pathogen}\n` +
-      `- Категория: ${diagnosis.category} | Степень: ${diagnosis.severity}\n` +
-      `${visualShare ? `- ${visualShare.trim()}\n` : ''}` +
-      `${chemicals ? `- ${chemicals.trim()}\n` : ''}` +
-      `${rate ? `- ${rate.trim()}\n` : ''}` +
-      `${weather ? `- ${weather.trim()}\n` : ''}\n` +
-      `Вопрос агроному: Какая ${kind} рекомендуется по регламентам СЗР в почвенно-климатических условиях Акмолинской области и что обязательно проверить в поле перед обработкой?`;
+    // Clean, natural user question for the chat bubble (SMS)
+    const cleanUserQuestion = `Какая ${kind} рекомендуется для культуры «${diagnosis.crop}» (${object}) в Акмолинской области и что проверить в поле перед обработкой?`;
+
+    // Hidden diagnosis context sent under the hood
+    const diagnosisContext = {
+      crop: diagnosis.crop,
+      object_name: object,
+      pathogen: diagnosis.pathogen,
+      category: diagnosis.category,
+      severity: diagnosis.severity,
+      affected_area_percent: diagnosis.affected_area_percent,
+      chemicals: diagnosis.chemicals,
+      rate: diagnosis.rate,
+      weather_limits: diagnosis.weather_limits,
+    };
 
     setViewMode('chat');
-    handleSendMessage(prompt);
+    handleSendMessage(cleanUserQuestion, diagnosisContext);
   };
 
-  const handleSendMessage = async (textToSend?: string) => {
+  const handleSendMessage = async (textToSend?: string, extraContext?: any) => {
     const q = (textToSend ?? inputText).trim();
     if (!q || isAnswering) return;
 
@@ -1009,7 +1021,11 @@ function AiToolsView({
     try {
       // Only send last 10 messages as context to reduce payload and latency
       const recentHistory = nextMessages.slice(-10);
-      const answer = await askAiAgronomist(q, recentHistory, farmContext);
+      const combinedContext = {
+        ...(farmContext || {}),
+        ...(extraContext ? { diagnosis: extraContext } : {}),
+      };
+      const answer = await askAiAgronomist(q, recentHistory, combinedContext);
       const aiMsg: AiChatMessage = {
         id: `ai_${Date.now()}`,
         sender: 'ai',
@@ -2158,9 +2174,7 @@ function AiFarmDigestCard({
             {/* Bottom action button */}
             <Pressable
               onPress={() =>
-                onAskQuestion(
-                  `Составь детальный план обследования и фитосанитарный прогноз для хозяйства «${summary.farmName}» (${summary.cropsSummary}, общая площадь: ${summary.totalAreaHa} га).`
-                )
+                onAskQuestion('Составь детальный план обследования полей и фитосанитарный прогноз для нашего хозяйства на ближайшую неделю.')
               }
               style={({ pressed }) => [
                 styles.aiDigestChatButton,
