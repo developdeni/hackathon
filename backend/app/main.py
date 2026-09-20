@@ -5,6 +5,7 @@ import csv
 import io
 import json
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -1342,7 +1343,7 @@ async def ai_count_livestock(request: Request) -> dict:
 class AiChatInput(BaseModel):
     question: str
     history: list[dict] | None = None
-    farm_context: dict[str, Any] | str | None = None
+    farm_context: Any | None = None
 
 
 @app.post("/api/ai/chat")
