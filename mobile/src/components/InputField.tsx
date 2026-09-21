@@ -31,15 +31,13 @@ const styles = StyleSheet.create({
   },
   label: {
     fontFamily: fontFamilies.semiBold,
-    fontSize: 12,
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
+    fontSize: 14,
     color: colors.textSecondary,
     paddingHorizontal: 4,
   },
   inputWrap: {
     backgroundColor: colors.surface,
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
     overflow: 'hidden',
@@ -49,7 +47,7 @@ const styles = StyleSheet.create({
   },
   input: {
     fontFamily: fontFamilies.regular,
-    fontSize: 15,
+    fontSize: 16,
     color: colors.text,
     paddingHorizontal: 14,
     paddingVertical: 13,

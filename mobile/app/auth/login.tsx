@@ -210,6 +210,9 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 24,
+    width: '100%',
+    maxWidth: 480,
+    alignSelf: 'center',
     paddingVertical: 48,
     gap: 32,
   },
@@ -219,9 +222,9 @@ const styles = StyleSheet.create({
   },
   logoText: {
     fontFamily: fontFamilies.bold,
-    fontSize: 32,
-    color: colors.primary,
-    letterSpacing: -0.5,
+    fontSize: 30,
+    color: colors.text,
+    letterSpacing: 0,
   },
   logoSub: {
     fontFamily: fontFamilies.medium,

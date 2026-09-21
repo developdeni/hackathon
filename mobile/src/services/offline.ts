@@ -66,6 +66,7 @@ export async function getLocalCache<T>(key: string): Promise<T | null> {
  * Removes data from local offline cache
  */
 export async function removeLocalCache(key: string): Promise<void> {
+  memoryCache.delete(key);
   try {
     await AsyncStorage.removeItem(`${CACHE_PREFIX}${key}`);
   } catch {

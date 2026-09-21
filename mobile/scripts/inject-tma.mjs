@@ -14,7 +14,7 @@ const TARGET = path.resolve(MOBILE, '..', 'backend', 'app', 'static', 'dist');
 
 const INJECT = `    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style id="tanap-tma-reset">
-      html, body, #root { background-color: #F2F2F7; }
+      html, body, #root { background-color: #EFEFF4; }
       html, body { touch-action: manipulation; }
       body {
         overflow: hidden;
@@ -25,6 +25,7 @@ const INJECT = `    <script src="https://telegram.org/js/telegram-web-app.js"></
       }
       * { -webkit-tap-highlight-color: transparent; }
       input, textarea { -webkit-user-select: text; user-select: text; }
+      [role="button"]:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #1F7A4D; outline-offset: 2px; }
     </style>
     <script>
     (function () {
@@ -33,7 +34,7 @@ const INJECT = `    <script src="https://telegram.org/js/telegram-web-app.js"></
         if (tg) {
           tg.ready(); tg.expand();
           if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes();
-          try { tg.setHeaderColor && tg.setHeaderColor('#F2F2F7'); tg.setBackgroundColor && tg.setBackgroundColor('#F2F2F7'); } catch (e) {}
+          try { tg.setHeaderColor && tg.setHeaderColor('#FFFFFF'); tg.setBackgroundColor && tg.setBackgroundColor('#EFEFF4'); } catch (e) {}
         }
       } catch (e) {}
       ['gesturestart','gesturechange','gestureend'].forEach(function (evt) {

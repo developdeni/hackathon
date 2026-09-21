@@ -1,20 +1,22 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, ImageStyle, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Image, ImageStyle, Pressable, StyleSheet, View } from 'react-native';
 import { Text } from '../../src/components/AppText';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Badge } from '../../src/components/Badge';
 import { Card } from '../../src/components/Card';
 import { EmptyState } from '../../src/components/EmptyState';
 import { Screen } from '../../src/components/Screen';
-import { CACHE_KEYS, getField, getInspection } from '../../src/services/api';
+import { CACHE_KEYS, deleteInspection, getField, getInspection } from '../../src/services/api';
 import { getMemoryCache } from '../../src/services/offline';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies, typography } from '../../src/theme/typography';
 import { Field, Inspection } from '../../src/types/domain';
+import { confirmDestructive, notify } from '../../src/utils/notify';
 
 export default function InspectionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
 
   // Instant hydration from memory cache (0ms perceived latency)
   const initialInsp = id ? getMemoryCache<Inspection>(CACHE_KEYS.INSPECTION(id)) : null;
@@ -26,6 +28,28 @@ export default function InspectionScreen() {
   const [field, setField] = useState<Field | null>(initialField);
   const [loading, setLoading] = useState(!initialInsp);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  function confirmDelete() {
+    if (!inspection || deleting) return;
+    confirmDestructive(
+      'Удалить запись осмотра?',
+      'Заметка и прикреплённый снимок будут удалены без возможности восстановления.',
+      () => void removeInspection(),
+    );
+  }
+
+  async function removeInspection() {
+    if (!inspection) return;
+    setDeleting(true);
+    try {
+      await deleteInspection(inspection.id, inspection.fieldId);
+      router.back();
+    } catch (nextError) {
+      notify('Не удалось удалить осмотр', nextError instanceof Error ? nextError.message : 'Повторите попытку.');
+      setDeleting(false);
+    }
+  }
 
   useEffect(() => {
     if (!id) return;
@@ -128,11 +152,6 @@ export default function InspectionScreen() {
                 : 'Не зафиксированы'}
             </Text>
           </View>
-          <View style={styles.divider} />
-          <View style={styles.tableRow}>
-            <Text style={styles.tableLabel}>Хранилище</Text>
-            <Text style={styles.tableValue}>Локальная SQLite</Text>
-          </View>
         </Card>
       </View>
 
@@ -143,6 +162,16 @@ export default function InspectionScreen() {
           Фотоматериал привязан к сохранённому контуру поля для проверки спутниковых аномалий Sentinel-2 L2A.
         </Text>
       </View>
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Удалить запись осмотра"
+        disabled={deleting}
+        onPress={confirmDelete}
+        style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed, deleting && styles.deleteButtonDisabled]}
+      >
+        {deleting ? <ActivityIndicator size="small" color={colors.danger} /> : <Text style={styles.deleteButtonText}>Удалить запись</Text>}
+      </Pressable>
     </Screen>
   );
 }
@@ -288,5 +317,20 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.textSecondary,
     lineHeight: 16,
+  },
+  deleteButton: {
+    minHeight: 48,
+    borderRadius: 8,
+    backgroundColor: colors.dangerSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+  },
+  deleteButtonPressed: { opacity: 0.72 },
+  deleteButtonDisabled: { opacity: 0.55 },
+  deleteButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 15,
+    color: colors.danger,
   },
 });

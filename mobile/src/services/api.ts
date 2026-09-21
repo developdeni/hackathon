@@ -17,8 +17,10 @@ import {
   Inspection,
   LandUseClassification,
   LoginInput,
+  ProfileShare,
   RegisterInput,
   SatelliteData,
+  SharePermission,
   ServerHealth,
   User,
   YieldForecast,
@@ -37,6 +39,8 @@ import {
   getPendingInspections,
   PendingInspection,
   pendingToDomainInspection,
+  removeLocalCache,
+  removePendingInspection,
   saveLocalCache,
 } from './offline';
 
@@ -168,6 +172,77 @@ export function telegramAuthUser(input: {
 
 export function getMe() {
   return apiFetch<User>('/api/auth/me');
+}
+
+export function updateProfile(input: {
+  name?: string;
+  organization?: string;
+  region?: string;
+}) {
+  return apiFetch<User>('/api/auth/profile', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function requestEmailCode(newEmail: string) {
+  return apiFetch<{ delivered: boolean; target: string; isChange: boolean; devCode?: string }>(
+    '/api/auth/email/request-code',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newEmail }),
+    },
+  );
+}
+
+export function confirmEmailCode(code: string) {
+  return apiFetch<User>('/api/auth/email/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Командный доступ (RBAC)
+// ---------------------------------------------------------------------------
+
+export function inviteToProfile(
+  profileId: string,
+  input: {
+    granteePublicId: string;
+    permissions: SharePermission[];
+    fieldScope: 'all' | 'selected';
+    fieldIds?: string[];
+  },
+) {
+  return apiFetch<ProfileShare>(`/api/profiles/${profileId}/shares`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function listProfileShares(profileId: string) {
+  return apiFetch<ProfileShare[]>(`/api/profiles/${profileId}/shares`);
+}
+
+export function listMyInvitations() {
+  return apiFetch<ProfileShare[]>('/api/shares/invitations');
+}
+
+export function acceptInvitation(shareId: string) {
+  return apiFetch<ProfileShare>(`/api/shares/${shareId}/accept`, { method: 'POST' });
+}
+
+export function declineInvitation(shareId: string) {
+  return apiFetch<{ ok: boolean }>(`/api/shares/${shareId}/decline`, { method: 'POST' });
+}
+
+export function revokeShare(shareId: string) {
+  return apiFetch<void>(`/api/shares/${shareId}`, { method: 'DELETE' });
 }
 
 export function getTelegramLinkCode() {
@@ -387,6 +462,21 @@ export async function getInspection(id: string): Promise<Inspection> {
     if (cached) return cached;
     throw err;
   }
+}
+
+export async function deleteInspection(id: string, fieldId: string): Promise<void> {
+  if (id.startsWith('local_')) {
+    await removePendingInspection(id);
+  } else {
+    await apiFetch<void>(`/api/inspections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  const listKey = CACHE_KEYS.INSPECTIONS(fieldId);
+  const cached = await getLocalCache<Inspection[]>(listKey);
+  if (cached) {
+    await saveLocalCache(listKey, cached.filter((item) => item.id !== id));
+  }
+  await removeLocalCache(CACHE_KEYS.INSPECTION(id));
 }
 
 /**

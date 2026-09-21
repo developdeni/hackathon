@@ -11,7 +11,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  TextInput,
+  TextInput as NativeTextInput,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,10 +21,12 @@ import { readAsStringAsync } from 'expo-file-system/legacy';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { SymbolView, type SFSymbol } from 'expo-symbols';
 
-import { Text } from '../src/components/AppText';
+import { Text, TextInput } from '../src/components/AppText';
 import { Avatar } from '../src/components/Avatar';
 import { Badge } from '../src/components/Badge';
 import { Card } from '../src/components/Card';
+import { ToolMenu } from '../src/components/ToolMenu';
+import { ToolIcon } from '../src/components/ToolIcon';
 import { EmptyState } from '../src/components/EmptyState';
 import { useAuth } from '../src/contexts/AuthContext';
 import {
@@ -46,7 +48,11 @@ import {
   getAiFarmSummary,
   cleanAiText,
   getTelegramLinkCode,
+  listMyInvitations,
+  acceptInvitation,
+  declineInvitation,
 } from '../src/services/api';
+import type { ProfileShare } from '../src/types/domain';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { notify, confirmDestructive } from '../src/utils/notify';
 import { useI18n } from '../src/i18n';
@@ -178,8 +184,22 @@ export default function MainScreen() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Latest values available to the stable `load` callback WITHOUT putting them in
+  // its dependency array. Without these, `load` was recreated on every profile
+  // switch, re-firing useFocusEffect and re-running `load`, which then reset the
+  // selection back to the (sticky) `params.profileId` — the profile "jumping".
+  const selectedProfileIdRef = useRef<string | null>(initialProfileId);
+  useEffect(() => {
+    selectedProfileIdRef.current = selectedProfileId;
+  }, [selectedProfileId]);
+  const profilesRef = useRef<FarmProfile[]>(initialProfiles);
+  useEffect(() => {
+    profilesRef.current = profiles;
+  }, [profiles]);
+
   useEffect(() => {
     if (params.profileId) {
+      selectedProfileIdRef.current = params.profileId;
       setSelectedProfileId(params.profileId);
       setActiveTab('fields');
     }
@@ -200,19 +220,28 @@ export default function MainScreen() {
   }, [params.tab, params.aiPrompt, params.fieldId, fields]);
 
 
+  // Picks the profile to show after a (re)load. The user's CURRENT selection always
+  // wins as long as it still exists; we only fall back to a default when there is no
+  // valid selection yet. This is what stops the view from snapping to another profile.
+  const resolveProfileId = useCallback((list: FarmProfile[]): string | null => {
+    const current = selectedProfileIdRef.current;
+    if (current && list.some((p) => p.id === current)) {
+      return current;
+    }
+    return list.find((p) => p.fieldCount > 0)?.id ?? list[0]?.id ?? null;
+  }, []);
+
   const load = useCallback(async () => {
     // 1. If memory was empty on cold start, hydrate from disk immediately
-    if (profiles.length === 0) {
+    if (profilesRef.current.length === 0) {
       const cachedProfiles = await getLocalCache<FarmProfile[]>(CACHE_KEYS.PROFILES);
       if (cachedProfiles && cachedProfiles.length > 0) {
         setProfiles(cachedProfiles);
-        const nextId =
-          params.profileId ??
-          selectedProfileId ??
-          cachedProfiles.find((p) => p.fieldCount > 0)?.id ??
-          cachedProfiles[0]?.id ??
-          null;
-        setSelectedProfileId(nextId);
+        const nextId = resolveProfileId(cachedProfiles);
+        if (nextId !== selectedProfileIdRef.current) {
+          selectedProfileIdRef.current = nextId;
+          setSelectedProfileId(nextId);
+        }
         if (nextId) {
           const cachedFields = await getLocalCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(nextId));
           if (cachedFields) setFields(cachedFields);
@@ -238,23 +267,24 @@ export default function MainScreen() {
 
       if (profileItems.status === 'fulfilled') {
         const pList = profileItems.value;
-        const profileWithFields = pList.find((profile) => profile.fieldCount > 0);
-        const nextProfileId =
-          params.profileId ?? selectedProfileId ?? profileWithFields?.id ?? pList[0]?.id ?? null;
+        const nextProfileId = resolveProfileId(pList);
         const fieldItems = nextProfileId ? await listFieldsForProfile(nextProfileId) : [];
         setProfiles(pList);
-        setSelectedProfileId(nextProfileId);
+        if (nextProfileId !== selectedProfileIdRef.current) {
+          selectedProfileIdRef.current = nextProfileId;
+          setSelectedProfileId(nextProfileId);
+        }
         setFields(fieldItems);
       }
     } catch (nextError) {
       setConnected(false);
-      if (profiles.length === 0) {
+      if (profilesRef.current.length === 0) {
         setError(nextError instanceof Error ? nextError.message : 'Не удалось подключиться к серверу');
       }
     } finally {
       setLoading(false);
     }
-  }, [params.profileId, selectedProfileId, profiles.length]);
+  }, [resolveProfileId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -424,6 +454,7 @@ export default function MainScreen() {
   );
 
   async function chooseProfile(profileId: string) {
+    selectedProfileIdRef.current = profileId;
     setSelectedProfileId(profileId);
     const cached = getMemoryCache<Field[]>(CACHE_KEYS.FIELDS_PROFILE(profileId));
     if (cached) {
@@ -522,6 +553,8 @@ export default function MainScreen() {
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
         <Pressable
           onPress={() => setActiveTab('ai_tools')}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'ai_tools' }}
           style={({ pressed }) => [styles.tabItem, pressed && styles.pressed]}
         >
           <AppIcon
@@ -541,6 +574,8 @@ export default function MainScreen() {
 
         <Pressable
           onPress={() => setActiveTab('fields')}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'fields' }}
           style={({ pressed }) => [styles.tabItem, pressed && styles.pressed]}
         >
           <AppIcon
@@ -560,6 +595,8 @@ export default function MainScreen() {
 
         <Pressable
           onPress={() => setActiveTab('profile')}
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'profile' }}
           style={({ pressed }) => [styles.tabItem, pressed && styles.pressed]}
         >
           <AppIcon
@@ -733,7 +770,7 @@ function AiToolsView({
   const [inputText, setInputText] = useState('');
   const [isAnswering, setIsAnswering] = useState(false);
   const chatListRef = useRef<FlatList<AiChatMessage>>(null);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<NativeTextInput>(null);
 
   // Track keyboard height directly — deterministic lift of the input above the keyboard
   // (more reliable than KeyboardAvoidingView with a nested layout + hidden tab bar).
@@ -1250,7 +1287,7 @@ function AiToolsView({
       >
         {!isUser && (
           <View style={styles.aiAvatarSmall}>
-            <Text style={{ fontSize: 14 }}>🌱</Text>
+            <ToolIcon name="chat" size={16} color={colors.primary} />
           </View>
         )}
         <View
@@ -1283,94 +1320,8 @@ function AiToolsView({
     );
   }, []);
 
-  // ── Menu View (two entry points) ──
   if (viewMode === 'menu') {
-    return (
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.aiMenuHeader}>
-          <View style={styles.aiChatHeaderAvatar}>
-            <Text style={{ fontSize: 24 }}>🌱</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.aiMenuTitle}>{t('ai.title')}</Text>
-            <Text style={styles.aiMenuSubtitle}>{t('ai.subtitle')}</Text>
-          </View>
-        </View>
-
-        <Pressable
-          onPress={() => setViewMode('photo')}
-          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
-        >
-          <View style={[styles.aiMenuIcon, { backgroundColor: '#E8F5E9' }]}>
-            <Text style={{ fontSize: 26 }}>🔬</Text>
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>{t('ai.photo.title')}</Text>
-            <Text style={styles.aiMenuCardDesc}>{t('ai.photo.sub')}</Text>
-          </View>
-          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
-        </Pressable>
-
-        <Pressable
-          onPress={() => setViewMode('count')}
-          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
-        >
-          <View style={[styles.aiMenuIcon, { backgroundColor: '#FFF3E0' }]}>
-            <Text style={{ fontSize: 26 }}>🌾</Text>
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>{t('ai.count.title')}</Text>
-            <Text style={styles.aiMenuCardDesc}>{t('ai.count.sub')}</Text>
-          </View>
-          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
-        </Pressable>
-
-        <Pressable
-          onPress={() => setViewMode('grain')}
-          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
-        >
-          <View style={[styles.aiMenuIcon, { backgroundColor: '#FEF9C3' }]}>
-            <Text style={{ fontSize: 26 }}>🌰</Text>
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>{t('ai.grain.title')}</Text>
-            <Text style={styles.aiMenuCardDesc}>{t('ai.grain.sub')}</Text>
-          </View>
-          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
-        </Pressable>
-
-        <Pressable
-          onPress={() => setViewMode('livestock')}
-          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
-        >
-          <View style={[styles.aiMenuIcon, { backgroundColor: '#EDE9FE' }]}>
-            <Text style={{ fontSize: 26 }}>🐄</Text>
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>{t('ai.herd.title')}</Text>
-            <Text style={styles.aiMenuCardDesc}>{t('ai.herd.sub')}</Text>
-          </View>
-          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
-        </Pressable>
-
-        <Pressable
-          onPress={() => setViewMode('chat')}
-          style={({ pressed }) => [styles.aiMenuCard, pressed && styles.aiMenuCardPressed]}
-        >
-          <View style={[styles.aiMenuIcon, { backgroundColor: '#E3F2FD' }]}>
-            <Text style={{ fontSize: 26 }}>💬</Text>
-          </View>
-          <View style={{ flex: 1, gap: 3 }}>
-            <Text style={styles.aiMenuCardTitle}>{t('ai.chat.title')}</Text>
-            <Text style={styles.aiMenuCardDesc}>{t('ai.chat.sub')}</Text>
-          </View>
-          <SymbolView name="chevron.right" size={16} tintColor={colors.muted} fallback={<Text>›</Text>} />
-        </Pressable>
-      </ScrollView>
-    );
+    return <ToolMenu onSelect={setViewMode} />;
   }
 
   // ── Photo Diagnosis View ──
@@ -2100,13 +2051,15 @@ function AiToolsView({
         <View style={styles.aiChatHeaderLeft}>
           <Pressable
             onPress={() => setViewMode('menu')}
+            accessibilityRole="button"
+            accessibilityLabel="Назад к инструментам"
             style={({ pressed }) => [styles.aiChatBackBtn, pressed && styles.pressed]}
             hitSlop={8}
           >
             <SymbolView name="chevron.left" size={20} tintColor={colors.primaryDark} fallback={<Text>←</Text>} />
           </Pressable>
           <View style={styles.aiChatHeaderAvatar}>
-            <Text style={{ fontSize: 20 }}>🌱</Text>
+            <ToolIcon name="chat" size={22} color={colors.primary} />
           </View>
           <View style={styles.aiChatHeaderTextWrap}>
             <Text style={styles.aiChatHeaderTitle} numberOfLines={1}>AI Агроном</Text>
@@ -2119,6 +2072,8 @@ function AiToolsView({
         {messages.length > 1 && (
           <Pressable
             onPress={handleClearHistory}
+            accessibilityRole="button"
+            accessibilityLabel="Очистить историю"
             style={({ pressed }) => [styles.aiChatHeaderBtn, pressed && styles.pressed]}
             hitSlop={10}
           >
@@ -2180,7 +2135,7 @@ function AiToolsView({
           isAnswering ? (
             <View style={[styles.aiMessageWrap, styles.aiMessageWrapAi]}>
               <View style={styles.aiAvatarSmall}>
-                <Text style={{ fontSize: 14 }}>🌱</Text>
+                <ToolIcon name="chat" size={16} color={colors.primary} />
               </View>
               <View style={[styles.aiBubble, styles.aiBubbleAi]}>
                 <TypingDots />
@@ -2205,6 +2160,7 @@ function AiToolsView({
             ref={inputRef}
             style={styles.aiTextInput}
             placeholder="Спросите агронома…"
+            accessibilityLabel="Сообщение агроному"
             placeholderTextColor={colors.muted}
             value={inputText}
             onChangeText={setInputText}
@@ -2221,6 +2177,8 @@ function AiToolsView({
               pressed && canSend && styles.pressed,
             ]}
             onPress={() => handleSendMessage()}
+            accessibilityRole="button"
+            accessibilityLabel="Отправить сообщение"
             disabled={!canSend}
           >
             <SymbolView
@@ -2386,6 +2344,11 @@ function FieldsView({
   onAskFieldAi,
 }: FieldsViewProps) {
   const { t } = useI18n();
+  // Права в выбранном профиле (для расшаренных профилей — по роли участника).
+  const profileRole = selectedProfile?.role ?? 'owner';
+  const profilePerms = selectedProfile?.permissions;
+  const isProfileOwner = profileRole === 'owner';
+  const canEditFields = isProfileOwner || !!profilePerms?.includes('edit');
   const [aiSummary, setAiSummary] = useState<AiFarmSummary | null>(null);
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
 
@@ -2485,15 +2448,27 @@ function FieldsView({
         />
       )}
 
+      {/* Роль в расшаренном профиле */}
+      {selectedProfile && !isProfileOwner ? (
+        <View style={styles.roleBanner}>
+          <Text style={styles.roleBannerText}>
+            {t('role.member')}
+            {selectedProfile.ownerName ? ` · ${selectedProfile.ownerName}` : ''}
+          </Text>
+        </View>
+      ) : null}
+
       {/* Кнопки действий */}
       <View style={styles.actionsRow}>
-        <Pressable
-          disabled={!selectedProfile}
-          onPress={onNewField}
-          style={({ pressed }) => [styles.primaryButton, (!selectedProfile || pressed) && styles.buttonPressed]}
-        >
-          <Text style={styles.primaryButtonText}>{t('fields.add')}</Text>
-        </Pressable>
+        {canEditFields ? (
+          <Pressable
+            disabled={!selectedProfile}
+            onPress={onNewField}
+            style={({ pressed }) => [styles.primaryButton, (!selectedProfile || pressed) && styles.buttonPressed]}
+          >
+            <Text style={styles.primaryButtonText}>{t('fields.add')}</Text>
+          </Pressable>
+        ) : null}
         <Pressable onPress={handleRefresh} style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
           <Text style={styles.secondaryButtonText}>{t('fields.refresh')}</Text>
         </Pressable>
@@ -2502,7 +2477,9 @@ function FieldsView({
       {/* Список участков */}
       <View style={styles.sectionHeaderRow}>
         <Text style={styles.sectionTitle}>{t('fields.listLabel')}</Text>
-        <Text style={styles.sectionHint} numberOfLines={1}>{t('fields.holdToDelete')}</Text>
+        {isProfileOwner ? (
+          <Text style={styles.sectionHint} numberOfLines={1}>{t('fields.holdToDelete')}</Text>
+        ) : null}
       </View>
 
       {loading ? (
@@ -2541,21 +2518,20 @@ function FieldsView({
               <View key={field.id} style={styles.fieldItemContainer}>
                 <Pressable
                   onPress={() => onOpenField(field.id)}
-                  onLongPress={() => onDeleteField(field)}
+                  onLongPress={isProfileOwner ? () => onDeleteField(field) : undefined}
                   delayLongPress={350}
                   style={({ pressed }) => [styles.fieldRow, pressed && styles.rowPressed]}
                 >
-                  <View style={[styles.fieldAccent, { backgroundColor: cropAccent.accent }]} />
                   <View style={[styles.fieldCode, { backgroundColor: cropAccent.bg }]}>
                     <Text style={[styles.fieldCodeText, { color: cropAccent.text }]}>{cropCode}</Text>
                   </View>
                   <View style={styles.fieldMain}>
                     <View style={styles.fieldTitleRow}>
-                      <Text style={styles.fieldName} numberOfLines={1}>
+                      <Text style={styles.fieldName}>
                         {field.name}
                       </Text>
                     </View>
-                    <Text style={styles.fieldMeta} numberOfLines={1}>
+                    <Text style={styles.fieldMeta}>
                       {field.cropType || 'Культура не задана'} • {field.areaHa.toFixed(1)} га{field.perimeterKm ? ` • P: ${field.perimeterKm.toFixed(1)} км` : ''}
                     </Text>
                     {centerCoords && (
@@ -2611,7 +2587,46 @@ interface ProfileViewProps {
 
 function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewProps) {
   const { t, lang, setLang } = useI18n();
+  const router = useRouter();
   const [linkingTg, setLinkingTg] = useState(false);
+  const [invitations, setInvitations] = useState<ProfileShare[]>([]);
+  const [copiedId, setCopiedId] = useState(false);
+
+  const loadInvitations = useCallback(async () => {
+    try {
+      setInvitations(await listMyInvitations());
+    } catch {
+      // тихо — приглашения не критичны для профиля
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadInvitations();
+  }, [loadInvitations]);
+
+  async function respondInvite(share: ProfileShare, accept: boolean) {
+    try {
+      if (accept) await acceptInvitation(share.id);
+      else await declineInvitation(share.id);
+      setInvitations((cur) => cur.filter((s) => s.id !== share.id));
+    } catch {
+      notify(t('team.error'), '');
+    }
+  }
+
+  function copyPublicId() {
+    const id = user?.publicId;
+    if (!id) return;
+    try {
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+        navigator.clipboard.writeText(id);
+      }
+    } catch {
+      // ignore
+    }
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 1500);
+  }
 
   // Hide the "Link Telegram" button inside the Telegram Mini App (already in Telegram)
   // and once the account is already linked.
@@ -2670,6 +2685,12 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
         <Text style={styles.userName}>{user.name}</Text>
         {user.organization ? <Text style={styles.userOrg}>{user.organization}</Text> : null}
         {user.region ? <Text style={styles.userRegion}>{user.region}</Text> : null}
+        <Pressable
+          onPress={() => router.push('/profile/edit')}
+          style={({ pressed }) => [styles.editProfileButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.editProfileButtonText}>{t('profile.edit')}</Text>
+        </Pressable>
       </View>
 
       {/* Stats row */}
@@ -2684,6 +2705,72 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
           <StatCell value={stats.profileCount} label={t('profile.stat.profiles')} />
         </Card>
       ) : null}
+
+      {/* Отображаемый ID пользователя (для приглашений в команду) */}
+      {user.publicId ? (
+        <>
+          <Text style={styles.sectionTitle}>{t('profile.myId')}</Text>
+          <Card style={styles.infoCard}>
+            <View style={styles.publicIdRow}>
+              <Text style={styles.publicIdValue} selectable>{user.publicId}</Text>
+              <Pressable
+                onPress={copyPublicId}
+                style={({ pressed }) => [styles.copyIdButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.copyIdText}>{copiedId ? `✓ ${t('profile.copied')}` : '⧉'}</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.publicIdHint}>{t('profile.idHint')}</Text>
+          </Card>
+        </>
+      ) : null}
+
+      {/* Входящие приглашения в команду */}
+      {invitations.length > 0 ? (
+        <>
+          <Text style={styles.sectionTitle}>{t('profile.invitations')}</Text>
+          {invitations.map((inv) => (
+            <Card key={inv.id} style={styles.inviteCard}>
+              <Text style={styles.inviteProfile}>{inv.profileName}</Text>
+              <Text style={styles.inviteMeta}>
+                {t('invite.from')}: {inv.ownerName} ·{' '}
+                {inv.fieldScope === 'all' ? t('invite.wholeProfile') : t('invite.selectedFields')}
+              </Text>
+              <View style={styles.invitePerms}>
+                {inv.permissions.filter((p) => p !== 'view').map((p) => (
+                  <View key={p} style={styles.permChip}>
+                    <Text style={styles.permChipText}>{t(`team.perm.${p}`)}</Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.inviteActions}>
+                <Pressable
+                  onPress={() => void respondInvite(inv, false)}
+                  style={({ pressed }) => [styles.inviteDecline, pressed && styles.pressed]}
+                >
+                  <Text style={styles.inviteDeclineText}>{t('invite.decline')}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void respondInvite(inv, true)}
+                  style={({ pressed }) => [styles.inviteAccept, pressed && styles.pressed]}
+                >
+                  <Text style={styles.inviteAcceptText}>{t('invite.accept')}</Text>
+                </Pressable>
+              </View>
+            </Card>
+          ))}
+        </>
+      ) : null}
+
+      {/* Команда и доступы */}
+      <Pressable
+        onPress={() => router.push('/profile/team')}
+        style={({ pressed }) => [styles.teamButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.teamButtonIcon}>👥</Text>
+        <Text style={styles.teamButtonText}>{t('profile.team')}</Text>
+        <Text style={styles.teamButtonChevron}>›</Text>
+      </Pressable>
 
       {/* Language selector */}
       <Text style={styles.sectionTitle}>{t('profile.language')}</Text>
@@ -2732,7 +2819,27 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
       {/* Account info */}
       <Text style={styles.sectionTitle}>{t('profile.accountData')}</Text>
       <Card style={styles.infoCard}>
-        <InfoRow label={t('profile.email')} value={user.email} />
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>{t('profile.email')}</Text>
+          <View style={styles.emailRowRight}>
+            <Text style={[styles.infoValue, { maxWidth: '100%' }]} selectable>{user.email}</Text>
+            <View
+              style={[
+                styles.emailBadge,
+                user.emailVerified ? styles.emailBadgeOk : styles.emailBadgeWarn,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.emailBadgeText,
+                  user.emailVerified ? styles.emailBadgeTextOk : styles.emailBadgeTextWarn,
+                ]}
+              >
+                {user.emailVerified ? `✓ ${t('profile.emailVerified')}` : t('profile.emailUnverified')}
+              </Text>
+            </View>
+          </View>
+        </View>
         <View style={styles.rowDivider} />
         <InfoRow label={t('profile.org')} value={user.organization || '—'} />
         <View style={styles.rowDivider} />
@@ -2995,7 +3102,7 @@ const styles = StyleSheet.create({
   },
   screenTitle: {
     fontFamily: fontFamilies.bold,
-    fontSize: 24,
+    fontSize: 22,
     color: colors.text,
   },
   screenSubtitle: {
@@ -3123,7 +3230,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingLeft: 0,
+    paddingLeft: 14,
     paddingRight: 14,
     paddingVertical: 12,
     minHeight: 70,
@@ -3137,9 +3244,9 @@ const styles = StyleSheet.create({
     borderRadius: 2,
   },
   fieldCode: {
-    width: 42,
-    height: 42,
-    borderRadius: 8,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     backgroundColor: colors.surfaceSecondary,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
@@ -3165,7 +3272,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     fontFamily: fontFamilies.semiBold,
-    fontSize: 14.5,
+    fontSize: 16,
     color: colors.text,
   },
   fieldMeta: {
@@ -3214,17 +3321,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 4.5,
     borderRadius: 7,
-    backgroundColor: '#F0F9F4',
+    backgroundColor: colors.primarySoft,
     borderWidth: 1,
-    borderColor: '#C3E6D2',
+    borderColor: colors.border,
   },
   fieldAskAiBtnPressed: {
-    backgroundColor: '#D7F0E2',
+    backgroundColor: colors.infoSoft,
   },
   fieldAskAiBtnText: {
     fontFamily: fontFamilies.semiBold,
     fontSize: 11.5,
-    color: '#0D7D4D',
+    color: colors.primaryDark,
   },
   rowDivider: {
     height: StyleSheet.hairlineWidth,
@@ -3240,7 +3347,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#DDF0DD',
+    borderColor: colors.border,
     gap: 10,
   },
   aiDigestHeader: {
@@ -3257,7 +3364,7 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: '#E8F5E9',
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -3265,7 +3372,7 @@ const styles = StyleSheet.create({
     fontFamily: fontFamilies.bold,
     fontSize: 11.5,
     letterSpacing: 0.6,
-    color: '#1B5E20',
+    color: colors.primaryDark,
   },
   aiDigestRefreshBtn: {
     padding: 4,
@@ -3322,38 +3429,38 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 11,
     paddingVertical: 6,
-    backgroundColor: '#F1F8F1',
+    backgroundColor: colors.primarySoft,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#CDE5CD',
+    borderColor: colors.border,
   },
   aiDigestChipPressed: {
-    backgroundColor: '#E1F0E1',
+    backgroundColor: colors.infoSoft,
   },
   aiDigestChipText: {
     fontFamily: fontFamilies.medium,
     fontSize: 11.5,
-    color: '#1B5E20',
+    color: colors.primaryDark,
   },
   aiDigestChatButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#F7FAF7',
+    backgroundColor: colors.primarySoft,
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderWidth: 1,
-    borderColor: '#E2EBE2',
+    borderColor: colors.border,
     marginTop: 2,
   },
   aiDigestChatButtonPressed: {
-    backgroundColor: '#EDF5ED',
+    backgroundColor: colors.infoSoft,
   },
   aiDigestChatButtonText: {
     fontFamily: fontFamilies.semiBold,
     fontSize: 12,
-    color: '#1B5E20',
+    color: colors.primaryDark,
   },
 
   /* AI Tools Screen Styles */
@@ -3754,60 +3861,6 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
   },
 
-  /* AI Tools — menu with two entry points */
-  aiMenuHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 8,
-    marginBottom: 4,
-  },
-  aiMenuTitle: {
-    fontFamily: fontFamilies.bold,
-    fontSize: 22,
-    color: colors.text,
-  },
-  aiMenuSubtitle: {
-    fontFamily: fontFamilies.regular,
-    fontSize: 13,
-    color: colors.textSecondary,
-  },
-  aiMenuCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    padding: 16,
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  aiMenuCardPressed: {
-    backgroundColor: colors.surfaceSecondary,
-  },
-  aiMenuIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  aiMenuCardTitle: {
-    fontFamily: fontFamilies.bold,
-    fontSize: 16,
-    color: colors.text,
-  },
-  aiMenuCardDesc: {
-    fontFamily: fontFamilies.regular,
-    fontSize: 12.5,
-    lineHeight: 17,
-    color: colors.textSecondary,
-  },
 
   /* Photo upload prompt */
   aiUploadCard: {
@@ -3882,7 +3935,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: colors.primarySoft,
     borderWidth: 1,
-    borderColor: '#C8E6C9',
+    borderColor: colors.border,
   },
   aiUploadBtnAltText: {
     fontFamily: fontFamilies.semiBold,
@@ -3890,8 +3943,8 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
   },
   aiChatBackBtn: {
-    width: 32,
-    height: 32,
+    width: 44,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: -4,
@@ -3900,7 +3953,7 @@ const styles = StyleSheet.create({
   /* AI Chat — Full-screen Messenger Layout */
   aiChatContainer: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: colors.chatBackground,
   },
   aiChatHeader: {
     flexDirection: 'row',
@@ -3924,7 +3977,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: '#E8F5E9',
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     flexShrink: 0,
@@ -3978,9 +4031,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingVertical: 8,
-    backgroundColor: '#EDF7F1',
+    backgroundColor: colors.primarySoft,
     borderBottomWidth: 1,
-    borderBottomColor: '#CBE7D7',
+    borderBottomColor: colors.border,
   },
   targetFieldBannerLeft: {
     flex: 1,
@@ -3993,11 +4046,11 @@ const styles = StyleSheet.create({
     flex: 1,
     fontFamily: fontFamilies.regular,
     fontSize: 12,
-    color: '#165B37',
+    color: colors.primaryDark,
   },
   targetFieldBannerBold: {
     fontFamily: fontFamilies.bold,
-    color: '#0E482A',
+    color: colors.primaryDark,
   },
   targetFieldClearBtn: {
     paddingHorizontal: 8,
@@ -4005,12 +4058,12 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#B3DFC6',
+    borderColor: colors.border,
   },
   targetFieldClearText: {
     fontFamily: fontFamilies.medium,
     fontSize: 11,
-    color: '#165B37',
+    color: colors.primaryDark,
   },
 
   /* Quick chips */
@@ -4038,10 +4091,10 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: colors.primarySoft,
     borderWidth: 1,
-    borderColor: '#C8E6C9',
+    borderColor: colors.border,
   },
   aiChipPressed: {
-    backgroundColor: '#C8E6C9',
+    backgroundColor: colors.infoSoft,
   },
   aiChipText: {
     fontFamily: fontFamilies.medium,
@@ -4052,7 +4105,7 @@ const styles = StyleSheet.create({
   /* Chat list */
   aiChatList: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: colors.chatBackground,
   },
   aiChatListContent: {
     paddingHorizontal: 14,
@@ -4079,12 +4132,12 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: '#E8F5E9',
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 2,
     borderWidth: 1,
-    borderColor: '#C8E6C9',
+    borderColor: colors.border,
   },
   aiBubble: {
     maxWidth: '82%',
@@ -4094,13 +4147,11 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   aiBubbleUser: {
-    backgroundColor: colors.primaryDark,
+    backgroundColor: colors.messageOutgoing,
     borderBottomRightRadius: 4,
   },
   aiBubbleAi: {
     backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
     borderBottomLeftRadius: 4,
   },
   aiBubbleError: {
@@ -4113,12 +4164,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   aiBubbleText: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 16,
+    lineHeight: 23,
   },
   aiBubbleTextUser: {
     fontFamily: fontFamilies.regular,
-    color: '#FFFFFF',
+    color: colors.text,
   },
   aiBubbleTextAi: {
     fontFamily: fontFamilies.regular,
@@ -4135,7 +4186,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
   },
   aiBubbleTimeUser: {
-    color: 'rgba(255,255,255,0.65)',
+    color: colors.messageTime,
   },
   aiBubbleTimeAi: {
     color: colors.muted,
@@ -4156,9 +4207,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   aiAttachBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
@@ -4179,17 +4230,17 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   aiSendButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: colors.primaryDark,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: colors.primaryDark,
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
+    shadowOpacity: 0,
     shadowRadius: 4,
-    elevation: 3,
+    elevation: 0,
   },
   aiSendButtonDisabled: {
     backgroundColor: colors.border,
@@ -4292,12 +4343,186 @@ const styles = StyleSheet.create({
     color: '#DC2626',
   },
 
+  /* Shared profile role banner */
+  roleBanner: {
+    backgroundColor: colors.infoSoft,
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    alignSelf: 'flex-start',
+  },
+  roleBannerText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12,
+    color: colors.info,
+  },
+
+  /* Public ID */
+  publicIdRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+  },
+  publicIdValue: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 20,
+    letterSpacing: 2,
+    color: colors.primary,
+  },
+  copyIdButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: colors.primarySoft,
+  },
+  copyIdText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: colors.primary,
+  },
+  publicIdHint: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: colors.textSecondary,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    paddingTop: 6,
+  },
+
+  /* Invitations */
+  inviteCard: {
+    padding: 14,
+    gap: 8,
+    marginBottom: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.primary,
+  },
+  inviteProfile: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 15,
+    color: colors.text,
+  },
+  inviteMeta: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    color: colors.textSecondary,
+  },
+  invitePerms: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  permChip: {
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  permChipText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  inviteActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  inviteDecline: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceSecondary,
+  },
+  inviteDeclineText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13.5,
+    color: colors.textSecondary,
+  },
+  inviteAccept: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+  },
+  inviteAcceptText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13.5,
+    color: '#FFFFFF',
+  },
+
+  /* Team button */
+  teamButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginTop: 4,
+  },
+  teamButtonIcon: {
+    fontSize: 20,
+  },
+  teamButtonText: {
+    flex: 1,
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 15,
+    color: colors.text,
+  },
+  teamButtonChevron: {
+    fontSize: 22,
+    color: colors.muted,
+  },
+
+  /* Edit profile button */
+  editProfileButton: {
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  editProfileButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: colors.primary,
+  },
+
+  /* Email verification badge in account card */
+  emailRowRight: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '75%',
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  emailBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  emailBadgeOk: { backgroundColor: colors.successSoft },
+  emailBadgeWarn: { backgroundColor: colors.warningSoft },
+  emailBadgeText: { fontFamily: fontFamilies.semiBold, fontSize: 10.5 },
+  emailBadgeTextOk: { color: colors.success },
+  emailBadgeTextWarn: { color: colors.warning },
+
   /* Telegram link button */
   tgLinkButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    backgroundColor: '#229ED9',
+    backgroundColor: colors.primary,
     borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 16,
@@ -4393,6 +4618,7 @@ const styles = StyleSheet.create({
   },
   tabItem: {
     flex: 1,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 3,
@@ -4400,8 +4626,8 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     fontFamily: fontFamilies.medium,
-    fontSize: 10.5,
-    color: '#8E8E93',
+    fontSize: 12,
+    color: colors.muted,
   },
   tabLabelActive: {
     fontFamily: fontFamilies.bold,

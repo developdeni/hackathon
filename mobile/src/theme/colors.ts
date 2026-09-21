@@ -4,10 +4,13 @@ export const colors = {
   surface: '#FFFFFF',
   surfaceSecondary: '#F4F4F7',
 
-  // Agricultural accents
-  primary: '#1E7E34',
-  primaryDark: '#0D531E',
-  primarySoft: '#E8F5E9',
+  // Agritech identity on top of the compact Telegram-inspired layout.
+  primary: '#1F7A4D',
+  primaryDark: '#145A37',
+  primarySoft: '#E7F3EB',
+  chatBackground: '#E8EDE9',
+  messageOutgoing: '#DDF1D7',
+  messageTime: '#48683E',
 
   // Crop markers
   cropWheatBg: '#E8F5E9',
@@ -19,8 +22,8 @@ export const colors = {
 
   // Typography
   text: '#1C1C1E',
-  textSecondary: '#707579',
-  muted: '#8E8E93',
+  textSecondary: '#606970',
+  muted: '#626B73',
 
   // Hairline Separators
   border: '#E5E5EA',
@@ -33,6 +36,6 @@ export const colors = {
   warningSoft: '#FEF3C7',
   danger: '#D32F2F',
   dangerSoft: '#FFEBEE',
-  info: '#2481CC',
-  infoSoft: '#E7F2FA',
+  info: '#27724B',
+  infoSoft: '#E8F3EC',
 };

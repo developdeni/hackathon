@@ -28,13 +28,11 @@ export function Card({ children, style, onPress }: Props) {
 const styles = StyleSheet.create({
   card: {
     backgroundColor: colors.surface,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
+    borderRadius: 8,
     overflow: 'hidden',
   },
   pressed: {
-    backgroundColor: '#F5F5F7',
+    backgroundColor: colors.surfaceSecondary,
     opacity: 0.85,
   },
 });

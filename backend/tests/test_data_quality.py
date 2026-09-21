@@ -257,7 +257,10 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
         meteo = weather.fallback_weather_context(53, 69)
         meteo["current"]["temperature"] = 12
         meteo["observedAt"] = "2026-09-20T12:00"
-        with patch.object(main, "_load_analysis_bundle", AsyncMock(return_value=(field, satellite, {}, meteo))):
+        with (
+            patch.object(main, "_load_accessible_field", return_value=({"id": "field-test"}, True, ["inspect"])),
+            patch.object(main, "_load_analysis_bundle", AsyncMock(return_value=(field, satellite, {}, meteo))),
+        ):
             response = await main.export_field_csv("field-test", "user-test")
         rows = list(csv.DictReader(io.StringIO(response.body.decode())))
         self.assertEqual(rows[0]["temperature_c"], "")

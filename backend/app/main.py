@@ -2,17 +2,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
+import secrets
+import threading
 from pathlib import Path
 from typing import Any
-import secrets
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField
@@ -26,12 +28,16 @@ from .auth import (
     verify_password,
 )
 from .database import (
+    REPORTS_DIR,
     UPLOADS_DIR,
     connect,
     field_from_row,
+    generate_public_id,
+    get_report_verification,
     initialize_database,
     inspection_from_row,
     profile_from_row,
+    save_report_verification,
     user_from_row,
     yield_history_from_row,
 )
@@ -41,12 +47,14 @@ from .copernicus import (
     fetch_field_satellite_series,
     fetch_field_risk_grid,
 )
+from .verification_view import render_not_found_page, render_verification_page
 from .analytics import build_risk_zones, classify_land_use
 from .weather import get_field_agro_weather
 from .climate_risk import get_field_climate_risk
 from .yield_forecast import get_yield_forecast
 from .field_operations import build_operations_recommendation, fetch_operations_weather
 from .telegram_auth import validate_telegram_init_data
+from . import emailer
 from starlette.concurrency import run_in_threadpool
 
 from .ai_advisor import (
@@ -94,6 +102,27 @@ class TelegramLinkConfirmInput(BaseModel):
     code: str = PydanticField(min_length=4, max_length=64)
     telegramId: int | str
     telegramName: str | None = None
+
+
+class ProfileUpdateInput(BaseModel):
+    name: str | None = PydanticField(default=None, min_length=2, max_length=80)
+    organization: str | None = PydanticField(default=None, max_length=120)
+    region: str | None = PydanticField(default=None, max_length=120)
+
+
+class EmailChangeRequestInput(BaseModel):
+    newEmail: str = PydanticField(min_length=5, max_length=120)
+
+
+class EmailConfirmInput(BaseModel):
+    code: str = PydanticField(min_length=4, max_length=12)
+
+
+class ShareInviteInput(BaseModel):
+    granteePublicId: str = PydanticField(min_length=3, max_length=24)
+    permissions: list[str] = PydanticField(default_factory=list)
+    fieldScope: str = PydanticField(default="all", pattern="^(all|selected)$")
+    fieldIds: list[str] = PydanticField(default_factory=list)
 
 
 class CreateProfileInput(BaseModel):
@@ -151,12 +180,116 @@ def require_user(user_id: str | None = Depends(get_current_user_id)) -> str:
 
 
 def _load_owned_field(connection, field_id: str, user_id: str):
-    """Возвращает поле только если оно принадлежит этому пользователю, иначе 404."""
+    """
+    Возвращает поле, если у пользователя есть к нему доступ на ЧТЕНИЕ (владелец или
+    активный командный доступ с правом view). Историческое имя сохранено, т.к. на него
+    завязаны read-эндпоинты; мутации используют _load_accessible_field с нужным правом.
+    """
+    row, _is_owner, _perms = _load_accessible_field(connection, field_id, user_id, need="view")
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Командный доступ (RBAC): владелец делится профилем/участками с другим юзером
+# ---------------------------------------------------------------------------
+
+# Возможные права. 'view' подразумевается для любого активного доступа.
+SHARE_PERMISSIONS = ("view", "ai", "edit", "inspect")
+
+
+def _new_public_id(connection) -> str:
+    existing = {
+        r["public_id"]
+        for r in connection.execute(
+            "SELECT public_id FROM users WHERE public_id IS NOT NULL"
+        ).fetchall()
+    }
+    return generate_public_id(existing)
+
+
+def _normalize_permissions(perms: list[str] | None) -> list[str]:
+    clean = {"view"}  # чтение всегда включено
+    for p in perms or []:
+        if p in SHARE_PERMISSIONS:
+            clean.add(p)
+    # стабильный порядок
+    return [p for p in SHARE_PERMISSIONS if p in clean]
+
+
+def _share_from_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "profileId": row["profile_id"],
+        "ownerId": row["owner_id"],
+        "granteeId": row["grantee_id"],
+        "permissions": json.loads(row["permissions_json"] or "[]"),
+        "fieldScope": row["field_scope"],
+        "fieldIds": json.loads(row["field_ids_json"] or "[]"),
+        "status": row["status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _active_share_for_profile(connection, user_id: str, profile_id: str) -> dict | None:
     row = connection.execute(
-        "SELECT * FROM fields WHERE id = ? AND user_id = ?", (field_id, user_id)
+        "SELECT * FROM profile_shares WHERE profile_id = ? AND grantee_id = ? AND status = 'active'",
+        (profile_id, user_id),
     ).fetchone()
+    return _share_from_row(row) if row is not None else None
+
+
+def _accessible_profile_ids(connection, user_id: str) -> set[str]:
+    """Профили, к которым у юзера есть доступ: свои + принятые шэры."""
+    ids = {
+        r["id"]
+        for r in connection.execute(
+            "SELECT id FROM profiles WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    }
+    for r in connection.execute(
+        "SELECT profile_id FROM profile_shares WHERE grantee_id = ? AND status = 'active'",
+        (user_id,),
+    ).fetchall():
+        ids.add(r["profile_id"])
+    return ids
+
+
+def _share_allows_field(share: dict, field_id: str) -> bool:
+    if share["fieldScope"] == "all":
+        return True
+    return field_id in (share.get("fieldIds") or [])
+
+
+def _load_accessible_field(connection, field_id: str, user_id: str, need: str | None = None):
+    """
+    Возвращает (row, is_owner, permissions) для поля, если у юзера есть доступ.
+    404 если поля нет/не виден; 403 если нет требуемого права `need`.
+    Владелец получает все права.
+    """
+    row = connection.execute("SELECT * FROM fields WHERE id = ?", (field_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Поле не найдено")
+
+    if row["user_id"] == user_id:
+        return row, True, list(SHARE_PERMISSIONS)
+
+    share = _active_share_for_profile(connection, user_id, row["profile_id"])
+    if share is None or not _share_allows_field(share, field_id):
+        raise HTTPException(status_code=404, detail="Поле не найдено")
+
+    perms = _normalize_permissions(share["permissions"])
+    if need is not None and need not in perms:
+        raise HTTPException(status_code=403, detail="Недостаточно прав для этого действия")
+    return row, False, perms
+
+
+def _owned_profile_or_404(connection, profile_id: str, user_id: str):
+    row = connection.execute(
+        "SELECT * FROM profiles WHERE id = ? AND user_id = ?", (profile_id, user_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Профиль не найден")
     return row
 
 
@@ -449,10 +582,11 @@ def register(payload: RegisterInput) -> dict:
 
         user_id = f"user-{uuid4()}"
         created_at = datetime.now(timezone.utc).isoformat()
+        public_id = _new_public_id(connection)
         connection.execute(
             """
-            INSERT INTO users (id, name, email, password_hash, organization, region, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (id, name, email, password_hash, organization, region, created_at, public_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -462,9 +596,16 @@ def register(payload: RegisterInput) -> dict:
                 payload.organization.strip(),
                 payload.region.strip(),
                 created_at,
+                public_id,
             ),
         )
         row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+    # Приветственное письмо — в фоне, чтобы не задерживать регистрацию и не ронять её
+    # при недоступности SMTP (emailer сам не бросает исключений).
+    threading.Thread(
+        target=emailer.send_welcome, args=(email, payload.name.strip()), daemon=True
+    ).start()
 
     token = create_access_token(user_id)
     return {"token": token, "user": user_from_row(row)}
@@ -517,8 +658,8 @@ def telegram_webapp_auth(payload: TelegramAuthInput) -> dict:
         if user_row is None:
             connection.execute(
                 """
-                INSERT INTO users (id, name, email, password_hash, organization, region, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, name, email, password_hash, organization, region, created_at, public_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -528,6 +669,7 @@ def telegram_webapp_auth(payload: TelegramAuthInput) -> dict:
                     payload.companyName.strip() or "КХ Партнёр",
                     "Акмолинская область",
                     now,
+                    _new_public_id(connection),
                 ),
             )
             profile_id = f"profile-tg-{tg_id_str}"
@@ -675,28 +817,26 @@ def confirm_telegram_link(payload: TelegramLinkConfirmInput) -> dict:
     return {"ok": True, "name": app_user["name"], "merged": merged}
 
 
-@app.get("/api/auth/me")
-def get_me(user_id: str = Depends(require_user)) -> dict:
-    with connect() as connection:
-        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Пользователь не найден")
+def _load_user_with_stats(connection, user_id: str) -> dict:
+    """Собирает объект пользователя вместе с агрегированной статистикой хозяйства."""
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-        # Aggregate stats for the user
-        stats = connection.execute(
-            """
-            SELECT
-                COUNT(DISTINCT f.id) AS field_count,
-                COUNT(DISTINCT i.id) AS inspection_count,
-                COALESCE(SUM(DISTINCT f.area_ha), 0) AS total_area_ha,
-                COUNT(DISTINCT p.id) AS profile_count
-            FROM profiles p
-            LEFT JOIN fields f ON f.profile_id = p.id
-            LEFT JOIN inspections i ON i.field_id = f.id
-            WHERE p.user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
+    stats = connection.execute(
+        """
+        SELECT
+            COUNT(DISTINCT f.id) AS field_count,
+            COUNT(DISTINCT i.id) AS inspection_count,
+            COALESCE(SUM(DISTINCT f.area_ha), 0) AS total_area_ha,
+            COUNT(DISTINCT p.id) AS profile_count
+        FROM profiles p
+        LEFT JOIN fields f ON f.profile_id = p.id
+        LEFT JOIN inspections i ON i.field_id = f.id
+        WHERE p.user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
 
     user = user_from_row(row)
     user["stats"] = {
@@ -708,30 +848,194 @@ def get_me(user_id: str = Depends(require_user)) -> dict:
     return user
 
 
+@app.get("/api/auth/me")
+def get_me(user_id: str = Depends(require_user)) -> dict:
+    with connect() as connection:
+        return _load_user_with_stats(connection, user_id)
+
+
+@app.patch("/api/auth/profile")
+def update_profile(payload: ProfileUpdateInput, user_id: str = Depends(require_user)) -> dict:
+    """Редактирование данных профиля (имя, организация, регион). Email меняется отдельно."""
+    updates: list[str] = []
+    values: list[str] = []
+    if payload.name is not None:
+        name = payload.name.strip()
+        if len(name) < 2:
+            raise HTTPException(status_code=422, detail="Имя слишком короткое")
+        updates.append("name = ?")
+        values.append(name)
+    if payload.organization is not None:
+        updates.append("organization = ?")
+        values.append(payload.organization.strip())
+    if payload.region is not None:
+        updates.append("region = ?")
+        values.append(payload.region.strip())
+
+    if not updates:
+        raise HTTPException(status_code=422, detail="Нет полей для обновления")
+
+    with connect() as connection:
+        values.append(user_id)
+        connection.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", values)
+        # Держим имя фермерского профиля синхронным с организацией, если она задана.
+        if payload.organization is not None and payload.organization.strip():
+            connection.execute(
+                "UPDATE profiles SET name = ? WHERE user_id = ? AND (name IS NULL OR name = '')",
+                (payload.organization.strip(), user_id),
+            )
+        return _load_user_with_stats(connection, user_id)
+
+
+def _generate_email_code() -> str:
+    """6-значный числовой код подтверждения."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+@app.post("/api/auth/email/request-code")
+def request_email_code(payload: EmailChangeRequestInput, user_id: str = Depends(require_user)) -> dict:
+    """Запрос кода подтверждения для смены / верификации email. Код уходит на новый адрес."""
+    new_email = payload.newEmail.strip().lower()
+    if not emailer.is_valid_email(new_email):
+        raise HTTPException(status_code=422, detail="Некорректный email")
+
+    with connect() as connection:
+        me = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if me is None:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+        # Адрес не должен принадлежать другому аккаунту.
+        taken = connection.execute(
+            "SELECT id FROM users WHERE email = ? AND id != ?", (new_email, user_id)
+        ).fetchone()
+        if taken is not None:
+            raise HTTPException(status_code=409, detail="Этот email уже используется другим аккаунтом")
+
+        same = new_email == (me["email"] or "").strip().lower()
+        code = _generate_email_code()
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            """
+            INSERT INTO email_change_codes (user_id, new_email, code, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET new_email = excluded.new_email,
+                                               code = excluded.code,
+                                               created_at = excluded.created_at
+            """,
+            (user_id, new_email, code, now),
+        )
+
+    delivered = emailer.send_verification_code(new_email, code)
+    result: dict[str, Any] = {
+        "delivered": delivered,
+        "target": new_email,
+        "isChange": not same,
+    }
+    # Если почта-отправитель не настроена — возвращаем код, чтобы поток подтверждения
+    # всё равно работал (демо/локально). Когда SMTP настроен, код по сети не отдаём.
+    if not delivered:
+        result["devCode"] = code
+    return result
+
+
+@app.post("/api/auth/email/confirm")
+def confirm_email_code(payload: EmailConfirmInput, user_id: str = Depends(require_user)) -> dict:
+    """Подтверждение кода: применяет новый email и помечает его как подтверждённый."""
+    code = payload.code.strip()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM email_change_codes WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Код не запрашивался. Запросите новый.")
+
+        # TTL 15 минут
+        try:
+            created = datetime.fromisoformat(row["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except ValueError:
+            created = datetime.now(timezone.utc) - timedelta(hours=1)
+        if datetime.now(timezone.utc) - created > timedelta(minutes=15):
+            connection.execute("DELETE FROM email_change_codes WHERE user_id = ?", (user_id,))
+            raise HTTPException(status_code=410, detail="Код истёк. Запросите новый.")
+
+        if not secrets.compare_digest(str(row["code"]), code):
+            raise HTTPException(status_code=400, detail="Неверный код")
+
+        new_email = (row["new_email"] or "").strip().lower()
+        # Повторная проверка занятости адреса на момент подтверждения.
+        taken = connection.execute(
+            "SELECT id FROM users WHERE email = ? AND id != ?", (new_email, user_id)
+        ).fetchone()
+        if taken is not None:
+            connection.execute("DELETE FROM email_change_codes WHERE user_id = ?", (user_id,))
+            raise HTTPException(status_code=409, detail="Этот email уже используется другим аккаунтом")
+
+        connection.execute(
+            "UPDATE users SET email = ?, email_verified = 1 WHERE id = ?", (new_email, user_id)
+        )
+        connection.execute("DELETE FROM email_change_codes WHERE user_id = ?", (user_id,))
+        return _load_user_with_stats(connection, user_id)
+
+
 # ---------------------------------------------------------------------------
 # Fields
 # ---------------------------------------------------------------------------
 
+def _fields_with_counts(connection, where_sql: str, params: list) -> list:
+    return connection.execute(
+        f"""
+        SELECT f.*, COUNT(i.id) AS inspection_count
+        FROM fields f
+        LEFT JOIN inspections i ON i.field_id = f.id
+        {where_sql}
+        GROUP BY f.id
+        ORDER BY f.name
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def _shared_field_rows(connection, share: dict) -> list:
+    """Поля из расшаренного профиля в пределах области доступа шэра."""
+    if share["fieldScope"] == "all":
+        return _fields_with_counts(connection, "WHERE f.profile_id = ?", [share["profileId"]])
+    ids = share.get("fieldIds") or []
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    return _fields_with_counts(
+        connection,
+        f"WHERE f.profile_id = ? AND f.id IN ({placeholders})",
+        [share["profileId"], *ids],
+    )
+
+
 @app.get("/api/fields")
 def list_fields(profile_id: str | None = None, user_id: str = Depends(require_user)) -> list[dict]:
     with connect() as connection:
-        params: list[str] = [user_id]
-        where_sql = "WHERE f.user_id = ?"
         if profile_id:
-            where_sql += " AND f.profile_id = ?"
-            params.append(profile_id)
-        rows = connection.execute(
-            f"""
-            SELECT f.*, COUNT(i.id) AS inspection_count
-            FROM fields f
-            LEFT JOIN inspections i ON i.field_id = f.id
-            {where_sql}
-            GROUP BY f.id
-            ORDER BY f.name
-            """,
-            tuple(params),
+            owned = connection.execute(
+                "SELECT 1 FROM profiles WHERE id = ? AND user_id = ?", (profile_id, user_id)
+            ).fetchone()
+            if owned is not None:
+                rows = _fields_with_counts(connection, "WHERE f.profile_id = ?", [profile_id])
+            else:
+                share = _active_share_for_profile(connection, user_id, profile_id)
+                rows = _shared_field_rows(connection, share) if share else []
+            return [field_from_row(row) for row in rows]
+
+        # Без указания профиля — все свои поля + все доступные по шэрам.
+        rows = _fields_with_counts(connection, "WHERE f.user_id = ?", [user_id])
+        result = [field_from_row(r) for r in rows]
+        shares = connection.execute(
+            "SELECT * FROM profile_shares WHERE grantee_id = ? AND status = 'active'",
+            (user_id,),
         ).fetchall()
-    return [field_from_row(row) for row in rows]
+        for s in shares:
+            result.extend(field_from_row(r) for r in _shared_field_rows(connection, _share_from_row(s)))
+    return result
 
 
 @app.get("/api/profiles")
@@ -748,7 +1052,49 @@ def list_profiles(user_id: str = Depends(require_user)) -> list[dict]:
             """,
             (user_id,),
         ).fetchall()
-    return [profile_from_row(row) for row in rows]
+        result: list[dict] = []
+        for row in rows:
+            d = profile_from_row(row)
+            d["role"] = "owner"
+            d["permissions"] = list(SHARE_PERMISSIONS)
+            result.append(d)
+
+        # Профили, расшаренные этому пользователю (принятые приглашения).
+        shares = connection.execute(
+            "SELECT * FROM profile_shares WHERE grantee_id = ? AND status = 'active'",
+            (user_id,),
+        ).fetchall()
+        for s in shares:
+            share = _share_from_row(s)
+            prow = connection.execute(
+                "SELECT * FROM profiles WHERE id = ?", (share["profileId"],)
+            ).fetchone()
+            if prow is None:
+                continue
+            if share["fieldScope"] == "all":
+                fc = connection.execute(
+                    "SELECT COUNT(*) AS c FROM fields WHERE profile_id = ?", (share["profileId"],)
+                ).fetchone()["c"]
+            else:
+                fc = len(share.get("fieldIds") or [])
+            owner = connection.execute(
+                "SELECT name FROM users WHERE id = ?", (share["ownerId"],)
+            ).fetchone()
+            result.append(
+                {
+                    "id": prow["id"],
+                    "name": prow["name"],
+                    "region": prow["region"],
+                    "createdAt": prow["created_at"],
+                    "fieldCount": fc,
+                    "role": "member",
+                    "permissions": _normalize_permissions(share["permissions"]),
+                    "shareId": share["id"],
+                    "ownerName": owner["name"] if owner else "",
+                    "fieldScope": share["fieldScope"],
+                }
+            )
+    return result
 
 
 @app.post("/api/profiles", status_code=201)
@@ -774,6 +1120,160 @@ def create_profile(payload: CreateProfileInput, user_id: str = Depends(require_u
             (profile_id,),
         ).fetchone()
     return profile_from_row(row)
+
+
+# ---------------------------------------------------------------------------
+# Командный доступ: приглашения и управление доступами
+# ---------------------------------------------------------------------------
+
+def _share_public(connection, share: dict, *, viewer: str) -> dict:
+    """Обогащённый объект доступа с именами владельца и участника."""
+    owner = connection.execute(
+        "SELECT name, public_id FROM users WHERE id = ?", (share["ownerId"],)
+    ).fetchone()
+    grantee = connection.execute(
+        "SELECT name, public_id, email FROM users WHERE id = ?", (share["granteeId"],)
+    ).fetchone()
+    prof = connection.execute(
+        "SELECT name FROM profiles WHERE id = ?", (share["profileId"],)
+    ).fetchone()
+    return {
+        **share,
+        "permissions": _normalize_permissions(share["permissions"]),
+        "ownerName": owner["name"] if owner else "",
+        "ownerPublicId": owner["public_id"] if owner else None,
+        "granteeName": grantee["name"] if grantee else "",
+        "granteePublicId": grantee["public_id"] if grantee else None,
+        "granteeEmail": grantee["email"] if grantee else "",
+        "profileName": prof["name"] if prof else "",
+        "isOwnerView": share["ownerId"] == viewer,
+    }
+
+
+@app.post("/api/profiles/{profile_id}/shares", status_code=201)
+def invite_to_profile(
+    profile_id: str, payload: ShareInviteInput, user_id: str = Depends(require_user)
+) -> dict:
+    """Владелец приглашает пользователя (по отображаемому ID) в профиль."""
+    with connect() as connection:
+        _owned_profile_or_404(connection, profile_id, user_id)
+
+        grantee = connection.execute(
+            "SELECT * FROM users WHERE public_id = ?", (payload.granteePublicId.strip().upper(),)
+        ).fetchone()
+        if grantee is None:
+            raise HTTPException(status_code=404, detail="Пользователь с таким ID не найден")
+        if grantee["id"] == user_id:
+            raise HTTPException(status_code=400, detail="Нельзя пригласить самого себя")
+
+        # Валидируем выбранные участки — они должны принадлежать этому профилю.
+        field_ids: list[str] = []
+        if payload.fieldScope == "selected":
+            valid = {
+                r["id"]
+                for r in connection.execute(
+                    "SELECT id FROM fields WHERE profile_id = ?", (profile_id,)
+                ).fetchall()
+            }
+            field_ids = [fid for fid in payload.fieldIds if fid in valid]
+            if not field_ids:
+                raise HTTPException(status_code=422, detail="Выберите хотя бы один участок")
+
+        perms = _normalize_permissions(payload.permissions)
+        now = datetime.now(timezone.utc).isoformat()
+        share_id = f"share-{uuid4()}"
+        # Один доступ на пару (профиль, участник): повторное приглашение обновляет его.
+        connection.execute(
+            """
+            INSERT INTO profile_shares
+                (id, profile_id, owner_id, grantee_id, permissions_json, field_scope, field_ids_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ON CONFLICT(profile_id, grantee_id) DO UPDATE SET
+                permissions_json = excluded.permissions_json,
+                field_scope = excluded.field_scope,
+                field_ids_json = excluded.field_ids_json,
+                status = 'pending',
+                updated_at = excluded.updated_at
+            """,
+            (
+                share_id, profile_id, user_id, grantee["id"],
+                json.dumps(perms), payload.fieldScope, json.dumps(field_ids), now, now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM profile_shares WHERE profile_id = ? AND grantee_id = ?",
+            (profile_id, grantee["id"]),
+        ).fetchone()
+        return _share_public(connection, _share_from_row(row), viewer=user_id)
+
+
+@app.get("/api/profiles/{profile_id}/shares")
+def list_profile_shares(profile_id: str, user_id: str = Depends(require_user)) -> list[dict]:
+    """Список участников/приглашений профиля — только для владельца."""
+    with connect() as connection:
+        _owned_profile_or_404(connection, profile_id, user_id)
+        rows = connection.execute(
+            "SELECT * FROM profile_shares WHERE profile_id = ? AND status != 'declined' ORDER BY created_at",
+            (profile_id,),
+        ).fetchall()
+        return [_share_public(connection, _share_from_row(r), viewer=user_id) for r in rows]
+
+
+@app.get("/api/shares/invitations")
+def list_my_invitations(user_id: str = Depends(require_user)) -> list[dict]:
+    """Входящие приглашения (pending) для текущего пользователя."""
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM profile_shares WHERE grantee_id = ? AND status = 'pending' ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+        return [_share_public(connection, _share_from_row(r), viewer=user_id) for r in rows]
+
+
+def _load_share(connection, share_id: str):
+    row = connection.execute("SELECT * FROM profile_shares WHERE id = ?", (share_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Доступ не найден")
+    return row
+
+
+@app.post("/api/shares/{share_id}/accept")
+def accept_invitation(share_id: str, user_id: str = Depends(require_user)) -> dict:
+    with connect() as connection:
+        row = _load_share(connection, share_id)
+        if row["grantee_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Это приглашение адресовано не вам")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "UPDATE profile_shares SET status = 'active', updated_at = ? WHERE id = ?",
+            (now, share_id),
+        )
+        row = _load_share(connection, share_id)
+        return _share_public(connection, _share_from_row(row), viewer=user_id)
+
+
+@app.post("/api/shares/{share_id}/decline")
+def decline_invitation(share_id: str, user_id: str = Depends(require_user)) -> dict:
+    with connect() as connection:
+        row = _load_share(connection, share_id)
+        if row["grantee_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Это приглашение адресовано не вам")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "UPDATE profile_shares SET status = 'declined', updated_at = ? WHERE id = ?",
+            (now, share_id),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/shares/{share_id}", status_code=204)
+def revoke_share(share_id: str, user_id: str = Depends(require_user)) -> None:
+    """Владелец отзывает доступ, либо участник сам выходит из общего профиля."""
+    with connect() as connection:
+        row = _load_share(connection, share_id)
+        if user_id not in (row["owner_id"], row["grantee_id"]):
+            raise HTTPException(status_code=403, detail="Нет прав на это действие")
+        connection.execute("DELETE FROM profile_shares WHERE id = ?", (share_id,))
 
 
 _AI_FARM_SUMMARY_CACHE: dict[str, tuple[float, dict]] = {}
@@ -964,11 +1464,16 @@ async def get_profile_ai_summary(
 @app.post("/api/profiles/{profile_id}/fields", status_code=201)
 def create_field(profile_id: str, payload: CreateFieldInput, user_id: str = Depends(require_user)) -> dict:
     with connect() as connection:
-        profile_exists = connection.execute(
-            "SELECT 1 FROM profiles WHERE id = ? AND user_id = ?", (profile_id, user_id)
+        prof = connection.execute(
+            "SELECT * FROM profiles WHERE id = ?", (profile_id,)
         ).fetchone()
-    if profile_exists is None:
-        raise HTTPException(status_code=404, detail="Профиль не найден")
+        if prof is None:
+            raise HTTPException(status_code=404, detail="Профиль не найден")
+        owner_id = prof["user_id"]
+        if owner_id != user_id:
+            share = _active_share_for_profile(connection, user_id, profile_id)
+            if share is None or "edit" not in _normalize_permissions(share["permissions"]):
+                raise HTTPException(status_code=403, detail="Нет права добавлять участки в этот профиль")
 
     boundary = [
         {"latitude": point.latitude, "longitude": point.longitude}
@@ -992,7 +1497,7 @@ def create_field(profile_id: str, payload: CreateFieldInput, user_id: str = Depe
             """,
             (
                 field_id,
-                user_id,
+                owner_id,
                 profile_id,
                 payload.name.strip(),
                 payload.cropType.strip(),
@@ -1042,7 +1547,7 @@ def update_field(field_id: str, payload: CreateFieldInput, user_id: str = Depend
     perimeter_km = compute_perimeter_km(boundary)
 
     with connect() as connection:
-        _load_owned_field(connection, field_id, user_id)
+        _load_accessible_field(connection, field_id, user_id, need="edit")
         connection.execute(
             """
             UPDATE fields
@@ -1078,7 +1583,9 @@ def update_field(field_id: str, payload: CreateFieldInput, user_id: str = Depend
 @app.delete("/api/fields/{field_id}", status_code=204)
 def delete_field(field_id: str, user_id: str = Depends(require_user)) -> None:
     with connect() as connection:
-        _load_owned_field(connection, field_id, user_id)
+        _row, is_owner, _perms = _load_accessible_field(connection, field_id, user_id)
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Удалять участки может только владелец профиля")
         connection.execute("DELETE FROM fields WHERE id = ?", (field_id,))
 
 
@@ -1109,7 +1616,7 @@ def create_field_yield_history(
     if payload.source not in {"farm_record", "partner", "official_stat"}:
         raise HTTPException(status_code=422, detail="Источник должен быть farm_record, partner или official_stat")
     with connect() as connection:
-        field_row = _load_owned_field(connection, field_id, user_id)
+        field_row, _is_owner, _perms = _load_accessible_field(connection, field_id, user_id, need="inspect")
         crop_type = (payload.cropType or field_row["crop_type"]).strip()
         record_id = f"yield-{uuid4()}"
         try:
@@ -1145,7 +1652,7 @@ def delete_field_yield_history(
     user_id: str = Depends(require_user),
 ) -> None:
     with connect() as connection:
-        _load_owned_field(connection, field_id, user_id)
+        _load_accessible_field(connection, field_id, user_id, need="inspect")
         result = connection.execute(
             "DELETE FROM yield_history WHERE id = ? AND field_id = ?",
             (record_id, field_id),
@@ -1253,6 +1760,8 @@ async def detect_field_boundary(payload: AutoBoundaryInput, user_id: str = Depen
 
 @app.get("/api/fields/{field_id}/export/geojson")
 async def export_field_geojson(field_id: str, user_id: str = Depends(require_user)) -> Response:
+    with connect() as connection:
+        _load_accessible_field(connection, field_id, user_id, need="inspect")
     field, _satellite, zones, _weather = await _load_analysis_bundle(field_id, user_id)
     content = json.dumps(_geojson_feature_collection(field, zones), ensure_ascii=False, indent=2)
     return Response(
@@ -1264,6 +1773,8 @@ async def export_field_geojson(field_id: str, user_id: str = Depends(require_use
 
 @app.get("/api/fields/{field_id}/export/csv")
 async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) -> Response:
+    with connect() as connection:
+        _load_accessible_field(connection, field_id, user_id, need="inspect")
     field, satellite, _zones, weather = await _load_analysis_bundle(field_id, user_id)
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1316,9 +1827,11 @@ async def export_field_csv(field_id: str, user_id: str = Depends(require_user)) 
 
 @app.get("/api/fields/{field_id}/export/pdf")
 @app.get("/api/fields/{field_id}/export/passport")
-async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) -> Response:
+async def export_field_pdf(field_id: str, request: Request, user_id: str = Depends(require_user)) -> Response:
     from .agropassport_pdf import generate_agropassport_pdf
 
+    with connect() as connection:
+        _load_accessible_field(connection, field_id, user_id, need="inspect")
     field, satellite, zones, weather = await _load_analysis_bundle(field_id, user_id)
     classification = classify_land_use(satellite.get("observations", []))
 
@@ -1328,15 +1841,29 @@ async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) 
             (field_id,),
         ).fetchall()
         user_row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        # Профиль принадлежит владельцу — берём по id (доступ уже проверен выше).
         profile_row = connection.execute(
-            "SELECT * FROM profiles WHERE id = ? AND user_id = ?",
-            (field.get("profileId"), user_id),
+            "SELECT * FROM profiles WHERE id = ?", (field.get("profileId"),)
         ).fetchone()
 
     yield_history = [yield_history_from_row(item) for item in history_rows]
     forecast = await get_yield_forecast(field, yield_history)
     user_dict = dict(user_row) if user_row else None
     profile_dict = dict(profile_row) if profile_row else None
+
+    report_id = f"rpt_{secrets.token_hex(8)}"
+    report_num = f"KZ-TANAP-2026-{secrets.token_hex(4).upper()}"
+
+    # Публичный адрес для QR-кода верификации
+    public_base = (os.getenv("PUBLIC_APP_URL") or "").strip().rstrip("/")
+    if not public_base:
+        req_origin = str(request.base_url).rstrip("/")
+        if "localhost" not in req_origin and "127.0.0.1" not in req_origin:
+            public_base = req_origin
+        else:
+            public_base = "https://lamps-sat-increases-pencil.trycloudflare.com"
+
+    verification_url = f"{public_base}/verify/{report_id}"
 
     pdf = generate_agropassport_pdf(
         field=field,
@@ -1348,12 +1875,83 @@ async def export_field_pdf(field_id: str, user_id: str = Depends(require_user)) 
         yield_forecast=forecast,
         user=user_dict,
         farm_profile=profile_dict,
+        report_id=report_id,
+        report_num=report_num,
+        verification_url=verification_url,
     )
+
+    file_sha256 = hashlib.sha256(pdf).hexdigest()
+    pdf_file_path = REPORTS_DIR / f"{report_id}.pdf"
+    pdf_file_path.write_bytes(pdf)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with connect() as connection:
+        save_report_verification(
+            connection=connection,
+            report_id=report_id,
+            field_id=field_id,
+            user_id=user_id,
+            report_num=report_num,
+            file_sha256=file_sha256,
+            payload_sha256=pdf.payload_sha256,
+            pdf_path=str(pdf_file_path),
+            metadata=pdf.metadata,
+            created_at=now_iso,
+        )
+
+    filename = f"tanap-report-{report_num}.pdf"
     return Response(
-        content=pdf,
+        content=bytes(pdf),
         media_type="application/pdf",
-        headers=_attachment_headers(f"agropassport-{field_id}.pdf"),
+        headers=_attachment_headers(filename),
     )
+
+
+@app.get("/verify/{identifier}", response_class=HTMLResponse)
+def verify_report_page(identifier: str) -> HTMLResponse:
+    """Публичная веб-страница проверки подлинности отчёта по QR-коду или номеру."""
+    with connect() as connection:
+        record = get_report_verification(connection, identifier)
+    if record is None:
+        return HTMLResponse(render_not_found_page(identifier), status_code=404)
+    return HTMLResponse(render_verification_page(record))
+
+
+@app.get("/verify/{identifier}/download")
+def download_verified_report(identifier: str):
+    """Скачивание проверенного оригинала PDF с точным совпадением SHA-256."""
+    with connect() as connection:
+        record = get_report_verification(connection, identifier)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Отчёт не найден в реестре")
+    pdf_path = Path(record["pdfPath"])
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Файл отчёта не найден на сервере")
+    report_num = record.get("reportNum") or "report"
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        filename=f"tanap-report-{report_num}.pdf",
+    )
+
+
+@app.get("/api/reports/{identifier}/verify")
+def verify_report_api(identifier: str) -> dict[str, Any]:
+    """JSON API для программной проверки статуса и хэша отчёта."""
+    with connect() as connection:
+        record = get_report_verification(connection, identifier)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Отчёт не найден в реестре")
+    return {
+        "valid": True,
+        "id": record["id"],
+        "reportNum": record["reportNum"],
+        "fieldId": record["fieldId"],
+        "fileSha256": record["fileSha256"],
+        "payloadSha256": record["payloadSha256"],
+        "createdAt": record["createdAt"],
+        "metadata": record["metadata"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1379,7 +1977,7 @@ async def create_inspection(
     user_id: str = Depends(require_user),
 ) -> dict:
     with connect() as connection:
-        _load_owned_field(connection, field_id, user_id)
+        _load_accessible_field(connection, field_id, user_id, need="inspect")
 
     content_type = request.headers.get("content-type", "")
     photo_bytes: bytes | None = None
@@ -1459,6 +2057,29 @@ def get_inspection(inspection_id: str, request: Request, user_id: str = Depends(
     if row is None:
         raise HTTPException(status_code=404, detail="Осмотр не найден")
     return inspection_from_row(row, str(request.base_url))
+
+
+@app.delete("/api/inspections/{inspection_id}", status_code=204)
+def delete_inspection(inspection_id: str, user_id: str = Depends(require_user)) -> None:
+    photo_path: str | None = None
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM inspections WHERE id = ?", (inspection_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Осмотр не найден")
+
+        _load_accessible_field(connection, row["field_id"], user_id, need="inspect")
+        photo_path = row["photo_path"]
+        connection.execute("DELETE FROM inspections WHERE id = ?", (inspection_id,))
+
+    if photo_path:
+        photo_file = UPLOADS_DIR / Path(photo_path).name
+        try:
+            photo_file.unlink(missing_ok=True)
+        except OSError:
+            # Запись уже удалена. Очистку повреждённого файла можно повторить отдельно.
+            pass
 
 
 # ---------------------------------------------------------------------------

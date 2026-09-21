@@ -1,12 +1,29 @@
 import json
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 
+# Алфавит без похожих символов (0/O, 1/I) — читаемый ID для человека.
+_PUBLIC_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def generate_public_id(existing: set[str] | None = None) -> str:
+    """Короткий отображаемый ID вида TA-XXXXXX (уникальный в пределах existing)."""
+    existing = existing or set()
+    while True:
+        code = "TA-" + "".join(secrets.choice(_PUBLIC_ID_ALPHABET) for _ in range(6))
+        if code not in existing:
+            return code
+
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BACKEND_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR = DATA_DIR / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = DATA_DIR / "tanap.db"
 
 
@@ -118,6 +135,12 @@ def initialize_database() -> None:
         if "telegram_id" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN telegram_id TEXT")
 
+        # Подтверждён ли email пользователя (0/1). Существующие аккаунты — 0.
+        if "email_verified" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0"
+            )
+
         # Short-lived one-time codes that bind a Telegram user to an app account.
         connection.execute(
             """
@@ -127,6 +150,90 @@ def initialize_database() -> None:
                 created_at TEXT NOT NULL
             );
             """
+        )
+
+        # Коды подтверждения email (смена адреса или верификация текущего).
+        # Один активный код на пользователя (user_id — первичный ключ).
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_change_codes (
+                user_id TEXT PRIMARY KEY NOT NULL,
+                new_email TEXT NOT NULL,
+                code TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # Отображаемый короткий ID пользователя (для приглашений в команду).
+        if "public_id" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN public_id TEXT")
+        # Бэкфилл для существующих аккаунтов без public_id.
+        existing_ids = {
+            r["public_id"]
+            for r in connection.execute(
+                "SELECT public_id FROM users WHERE public_id IS NOT NULL"
+            ).fetchall()
+        }
+        for r in connection.execute("SELECT id FROM users WHERE public_id IS NULL").fetchall():
+            new_pid = generate_public_id(existing_ids)
+            existing_ids.add(new_pid)
+            connection.execute("UPDATE users SET public_id = ? WHERE id = ?", (new_pid, r["id"]))
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_id ON users(public_id)"
+        )
+
+        # Командный доступ: владелец профиля делится им с другим пользователем.
+        # status: pending (приглашение) / active (принято) / declined / revoked.
+        # permissions — JSON-массив флагов из {view, ai, edit, inspect}.
+        # field_scope: 'all' | 'selected'; field_ids — JSON-массив id участков.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profile_shares (
+                id TEXT PRIMARY KEY NOT NULL,
+                profile_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                grantee_id TEXT NOT NULL,
+                permissions_json TEXT NOT NULL DEFAULT '[]',
+                field_scope TEXT NOT NULL DEFAULT 'all',
+                field_ids_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(profile_id, grantee_id)
+            );
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profile_shares_grantee ON profile_shares(grantee_id, status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profile_shares_profile ON profile_shares(profile_id, status)"
+        )
+
+        # Реестр верификации отчётов и агропаспортов полей.
+        # Хранит криптографические контрольные суммы (SHA-256) и метаданные
+        # для публичной проверки подлинности по QR-коду.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_verifications (
+                id TEXT PRIMARY KEY NOT NULL,
+                field_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                report_num TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                pdf_path TEXT NOT NULL,
+                meta_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_report_verifications_field ON report_verifications(field_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_report_verifications_num ON report_verifications(report_num)"
         )
 
         # Убираем старые ОБЩИЕ (не привязанные к пользователю) профили и поля —
@@ -186,6 +293,8 @@ def user_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "region": row["region"],
         "createdAt": row["created_at"],
         "telegramLinked": bool(row["telegram_id"]) if "telegram_id" in keys else False,
+        "emailVerified": bool(row["email_verified"]) if "email_verified" in keys else False,
+        "publicId": row["public_id"] if "public_id" in keys else None,
     }
 
 
@@ -214,3 +323,72 @@ def yield_history_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "notes": row["notes"],
         "createdAt": row["created_at"],
     }
+
+
+def report_verification_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    meta = {}
+    try:
+        meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+    except Exception:
+        meta = {}
+    return {
+        "id": row["id"],
+        "fieldId": row["field_id"],
+        "userId": row["user_id"],
+        "reportNum": row["report_num"],
+        "fileSha256": row["file_sha256"],
+        "payloadSha256": row["payload_sha256"],
+        "pdfPath": row["pdf_path"],
+        "metadata": meta,
+        "createdAt": row["created_at"],
+    }
+
+
+def save_report_verification(
+    connection: sqlite3.Connection,
+    report_id: str,
+    field_id: str,
+    user_id: str,
+    report_num: str,
+    file_sha256: str,
+    payload_sha256: str,
+    pdf_path: str,
+    metadata: dict[str, Any],
+    created_at: str,
+) -> None:
+    meta_json = json.dumps(metadata, ensure_ascii=False)
+    connection.execute(
+        """
+        INSERT INTO report_verifications (
+            id, field_id, user_id, report_num, file_sha256, payload_sha256, pdf_path, meta_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            file_sha256 = excluded.file_sha256,
+            payload_sha256 = excluded.payload_sha256,
+            pdf_path = excluded.pdf_path,
+            meta_json = excluded.meta_json,
+            created_at = excluded.created_at
+        """,
+        (
+            report_id,
+            field_id,
+            user_id,
+            report_num,
+            file_sha256,
+            payload_sha256,
+            pdf_path,
+            meta_json,
+            created_at,
+        ),
+    )
+
+
+def get_report_verification(connection: sqlite3.Connection, identifier: str) -> dict[str, Any] | None:
+    """Ищет запись верификации по id (report_id) или по реестровому номеру report_num."""
+    ident = identifier.strip()
+    row = connection.execute(
+        "SELECT * FROM report_verifications WHERE id = ? OR report_num = ?",
+        (ident, ident),
+    ).fetchone()
+    return report_verification_from_row(row) if row is not None else None
+

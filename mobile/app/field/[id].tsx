@@ -21,6 +21,7 @@ import { Screen } from '../../src/components/Screen';
 import {
   buildAuthorizedDownloadUrl,
   deleteField,
+  deleteInspection,
   getField,
   getFieldClassification,
   getFieldClimateRisk,
@@ -36,6 +37,7 @@ import {
 import { getLocalCache, getMemoryCache, saveLocalCache } from '../../src/services/offline';
 import { colors } from '../../src/theme/colors';
 import { fontFamilies } from '../../src/theme/typography';
+import { confirmDestructive, notify } from '../../src/utils/notify';
 import {
   AgroWeather,
   ClimateRiskForecast,
@@ -530,6 +532,27 @@ export default function FieldScreen() {
       router.replace({ pathname: '/', params: { profileId: field!.profileId } });
     } catch (e) {
       Alert.alert('Не удалось удалить', e instanceof Error ? e.message : 'Повторите попытку.');
+    }
+  }
+
+  function confirmInspectionDelete(inspection: Inspection) {
+    confirmDestructive(
+      'Удалить запись осмотра?',
+      'Заметка и прикреплённый снимок будут удалены без возможности восстановления.',
+      () => void removeInspection(inspection),
+    );
+  }
+
+  async function removeInspection(inspection: Inspection) {
+    try {
+      await deleteInspection(inspection.id, inspection.fieldId);
+      setInspections((current) => {
+        const next = current.filter((item) => item.id !== inspection.id);
+        void saveLocalCache(CACHE_KEYS.INSPECTIONS(inspection.fieldId), next);
+        return next;
+      });
+    } catch (nextError) {
+      notify('Не удалось удалить осмотр', nextError instanceof Error ? nextError.message : 'Повторите попытку.');
     }
   }
 
@@ -1262,35 +1285,47 @@ export default function FieldScreen() {
         <Card style={styles.inspGroup}>
           {inspections.map((insp, idx) => (
             <View key={insp.id}>
-              <Pressable
-                onPress={() => {
-                  void saveLocalCache(CACHE_KEYS.INSPECTION(insp.id), insp);
-                  router.push({ pathname: '/inspection/[id]', params: { id: insp.id } });
-                }}
-                style={({ pressed }) => [styles.inspRow, pressed && styles.inspRowPressed]}
-              >
-                {insp.photoUrl ? (
-                  <Image source={{ uri: insp.photoUrl }} style={styles.thumb} />
-                ) : (
-                  <View style={styles.thumbPlaceholder}>
-                    <Text style={styles.thumbPlaceholderText}>АКТ</Text>
+              <View style={styles.inspRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Открыть осмотр от ${formatDate(insp.createdAt)}`}
+                  onPress={() => {
+                    void saveLocalCache(CACHE_KEYS.INSPECTION(insp.id), insp);
+                    router.push({ pathname: '/inspection/[id]', params: { id: insp.id } });
+                  }}
+                  style={({ pressed }) => [styles.inspOpen, pressed && styles.inspRowPressed]}
+                >
+                  {insp.photoUrl ? (
+                    <Image source={{ uri: insp.photoUrl }} style={styles.thumb} />
+                  ) : (
+                    <View style={styles.thumbPlaceholder}>
+                      <Text style={styles.thumbPlaceholderText}>АКТ</Text>
+                    </View>
+                  )}
+                  <View style={styles.inspMain}>
+                    <View style={styles.inspTopRow}>
+                      <Text style={styles.inspDate}>{formatDate(insp.createdAt)}</Text>
+                      {insp.status === 'pending' ? (
+                        <Badge label="Офлайн-очередь" variant="warning" />
+                      ) : (
+                        <Badge label="Сохранено" variant="success" />
+                      )}
+                    </View>
+                    <Text numberOfLines={2} style={styles.inspNote}>
+                      {insp.note || 'Без текстового описания'}
+                    </Text>
                   </View>
-                )}
-                <View style={styles.inspMain}>
-                  <View style={styles.inspTopRow}>
-                    <Text style={styles.inspDate}>{formatDate(insp.createdAt)}</Text>
-                    {insp.status === 'pending' ? (
-                      <Badge label="Офлайн-очередь" variant="warning" />
-                    ) : (
-                      <Badge label="Сохранено" variant="success" />
-                    )}
-                  </View>
-                  <Text numberOfLines={2} style={styles.inspNote}>
-                    {insp.note || 'Без текстового описания'}
-                  </Text>
-                </View>
-                <Text style={styles.chevron}>›</Text>
-              </Pressable>
+                  <Text style={styles.chevron}>›</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Удалить осмотр от ${formatDate(insp.createdAt)}`}
+                  onPress={() => confirmInspectionDelete(insp)}
+                  style={({ pressed }) => [styles.inspDeleteButton, pressed && styles.inspDeletePressed]}
+                >
+                  <Text style={styles.inspDeleteText}>Удалить</Text>
+                </Pressable>
+              </View>
               {idx < inspections.length - 1 && <View style={styles.inspDivider} />}
             </View>
           ))}
@@ -1773,7 +1808,13 @@ const styles = StyleSheet.create({
   inspRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
+  },
+  inspOpen: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 14,
     paddingVertical: 10,
     gap: 12,
   },
@@ -1795,5 +1836,14 @@ const styles = StyleSheet.create({
   inspDate: { fontFamily: fontFamilies.semiBold, fontSize: 13.5, color: colors.text, flex: 1 },
   inspNote: { fontFamily: fontFamilies.regular, fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
   chevron: { fontFamily: fontFamilies.regular, fontSize: 20, color: '#C7C7CC' },
+  inspDeleteButton: {
+    alignSelf: 'stretch',
+    minWidth: 70,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  inspDeletePressed: { backgroundColor: colors.dangerSoft },
+  inspDeleteText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.danger },
   inspDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: 72 },
 });

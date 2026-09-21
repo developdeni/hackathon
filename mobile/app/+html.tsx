@@ -25,7 +25,7 @@ export default function Root({ children }: PropsWithChildren) {
 const customWebStyles = `
 html, body, #root {
   height: 100%;
-  background-color: #07080B;
+  background-color: #EFEFF4;
 }
 html, body {
   /* Disable browser gesture zoom / double-tap zoom and the 300ms tap delay */
@@ -47,6 +47,10 @@ input, textarea {
   user-select: text;
   -webkit-user-select: text;
 }
+[role="button"]:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid #1F7A4D;
+  outline-offset: 2px;
+}
 `;
 
 // Runs on the raw HTML (web / Telegram Mini App only — never bundled into native).
@@ -59,8 +63,8 @@ const telegramMiniAppBootstrap = `
       tg.expand();
       if (typeof tg.disableVerticalSwipes === 'function') tg.disableVerticalSwipes();
       try {
-        tg.setHeaderColor && tg.setHeaderColor('#F2F2F7');
-        tg.setBackgroundColor && tg.setBackgroundColor('#F2F2F7');
+        tg.setHeaderColor && tg.setHeaderColor('#FFFFFF');
+        tg.setBackgroundColor && tg.setBackgroundColor('#EFEFF4');
       } catch (e) {}
     }
   } catch (e) {}

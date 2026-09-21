@@ -15,12 +15,42 @@ export type Field = {
   inspectionCount: number;
 };
 
+export type SharePermission = 'view' | 'ai' | 'edit' | 'inspect';
+export type ProfileRole = 'owner' | 'member';
+
 export type FarmProfile = {
   id: string;
   name: string;
   region: string;
   createdAt: string;
   fieldCount: number;
+  // Командный доступ: своя роль в этом профиле и набор прав.
+  role?: ProfileRole;
+  permissions?: SharePermission[];
+  shareId?: string;
+  ownerName?: string;
+  fieldScope?: 'all' | 'selected';
+};
+
+// Доступ / приглашение в командный профиль.
+export type ProfileShare = {
+  id: string;
+  profileId: string;
+  ownerId: string;
+  granteeId: string;
+  permissions: SharePermission[];
+  fieldScope: 'all' | 'selected';
+  fieldIds: string[];
+  status: 'pending' | 'active' | 'declined' | 'revoked';
+  createdAt: string;
+  updatedAt: string;
+  ownerName: string;
+  ownerPublicId?: string | null;
+  granteeName: string;
+  granteePublicId?: string | null;
+  granteeEmail: string;
+  profileName: string;
+  isOwnerView: boolean;
 };
 
 export type CreateProfileInput = {
@@ -65,6 +95,8 @@ export type User = {
   region: string;
   createdAt: string;
   telegramLinked?: boolean;
+  emailVerified?: boolean;
+  publicId?: string;
   stats?: {
     fieldCount: number;
     inspectionCount: number;

@@ -39,11 +39,11 @@ export default function RootLayout() {
       <StatusBar style="dark" />
       <Stack
         screenOptions={{
-          headerStyle: { backgroundColor: colors.background },
+          headerStyle: { backgroundColor: colors.surface },
           headerShadowVisible: false,
           headerTintColor: colors.primaryDark,
           headerTitleStyle: {
-            fontFamily: fontFamilies.bold,
+            fontWeight: '600',
             fontSize: 17,
           },
           headerBackTitle: 'Назад',
@@ -74,6 +74,8 @@ export default function RootLayout() {
 
         {/* Profile screens */}
         <Stack.Screen name="profile/me" options={{ title: 'Мой профиль', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="profile/edit" options={{ title: 'Редактирование профиля', headerBackTitle: 'Назад' }} />
+        <Stack.Screen name="profile/team" options={{ title: 'Команда', headerBackTitle: 'Назад' }} />
         <Stack.Screen name="profile/new" options={{ title: 'Новый профиль', headerBackTitle: 'Назад' }} />
 
         {/* Field screens */}

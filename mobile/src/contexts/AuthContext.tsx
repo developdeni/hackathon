@@ -25,6 +25,7 @@ type AuthContextValue = {
   loginWithTelegram: (input: TelegramAuthInput) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  applyUser: (user: User) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -118,6 +119,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     router.replace('/auth/login');
   }, [router]);
 
+  const applyUser = useCallback(async (next: User) => {
+    setUser(next);
+    await saveCachedUser(next);
+  }, []);
+
   const refreshUser = useCallback(async () => {
     try {
       const me = await getMe();
@@ -133,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, loginWithTelegram, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, loginWithTelegram, logout, refreshUser, applyUser }}>
       {children}
     </AuthContext.Provider>
   );

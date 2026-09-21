@@ -69,7 +69,7 @@ const variantStyles: Record<BadgeVariant, { container: ViewStyle; text: TextStyl
     text: { color: colors.muted },
   },
   info: {
-    container: { backgroundColor: '#E3F2FD' },
-    text: { color: '#0D47A1' },
+    container: { backgroundColor: colors.infoSoft },
+    text: { color: colors.info },
   },
 };
