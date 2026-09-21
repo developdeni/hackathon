@@ -27,6 +27,7 @@
 | Сервис | Ссылка | Описание |
 | :--- | :--- | :--- |
 | 📱 **Web-версия / TMA** | [lamps-sat-increases-pencil.trycloudflare.com](https://lamps-sat-increases-pencil.trycloudflare.com/) | Полноценное веб-приложение (Expo Web / TMA) с картами и аналитикой |
+| 📦 **Android APK и iOS IPA** | [Скачать готовые сборки из Google Drive](https://drive.google.com/drive/folders/1RfdAjN_8WmoZbg5LQoqlV8shW8fJpO_b?usp=sharing) | Папка проекта с готовыми установочными файлами APK для Android и IPA для iPhone |
 | 🤖 **Telegram-бот** | [@tanapai_aqmola_bot](https://t.me/tanapai_aqmola_bot) | Полевой ассистент, голосовые осмотры, запуск Telegram Mini App |
 | 🛡️ **Онлайн-реестр верификации** | [Проверка Агропаспорта онлайн](https://lamps-sat-increases-pencil.trycloudflare.com/verify/KZ-TANAP-2026-242F223C) | Публичный портал проверки SHA-256 хэша отчёта с drag-and-drop валидатором |
 | 📥 **Скачать заверенный PDF** | [Скачать Агропаспорт](https://lamps-sat-increases-pencil.trycloudflare.com/verify/KZ-TANAP-2026-242F223C/download) | Сгенерированный системой оригинальный PDF с живым QR-кодом |
