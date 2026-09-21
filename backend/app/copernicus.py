@@ -308,7 +308,7 @@ async def query_sentinel_hub_statistical(
               var ndvi = dV != 0 ? (samples.B08 - samples.B04) / dV : 0;
               var ndmi = dM != 0 ? (samples.B08 - samples.B11) / dM : 0;
               // dataMask=0 у облачных пикселей — они исключаются из статистики (чистое среднее)
-              var cloud = (scl == 8 || scl == 9 || scl == 10) ? 1 : 0;
+              var cloud = (scl == 3 || scl == 8 || scl == 9 || scl == 10 || scl == 11) ? 1 : 0;
               return { ndvi: [ndvi], ndmi: [ndmi], quality: [valid, cloud], dataMask: [valid, valid, samples.dataMask] };
             }
             """,
@@ -845,13 +845,27 @@ def parse_statistical_response(raw: dict[str, Any]) -> dict[str, Any] | None:
         value = ndvi_median if ndvi_median is not None else ndvi_mean
         anomaly = reliability == "high" and previous_ndvi is not None and (previous_ndvi - value) >= 0.12
 
+        cloud_pct = round(cloud_mean * 100, 1) if isinstance(cloud_mean, (int, float)) and math.isfinite(cloud_mean) else None
+        if cloud_pct is not None:
+            if cloud_pct == 0.0:
+                cloud_status = "0% · Ясно над полем"
+            elif cloud_pct <= 5.0:
+                cloud_status = f"{cloud_pct}% · Тени/дымка"
+            elif cloud_pct <= 20.0:
+                cloud_status = f"{cloud_pct}% · Рассеянная облачность"
+            else:
+                cloud_status = f"{cloud_pct}% · Облачно"
+        else:
+            cloud_status = None
+
         observation = {
             "date": entry.get("interval", {}).get("from", "")[:10],
             "periodEnd": entry.get("interval", {}).get("to", "")[:10],
             "ndviMean": ndvi_mean,
             "ndviMedian": ndvi_median,
             "ndmiMean": ndmi_mean,
-            "cloudCoveragePercent": round(cloud_mean * 100, 1) if isinstance(cloud_mean, (int, float)) and math.isfinite(cloud_mean) else None,
+            "cloudCoveragePercent": cloud_pct,
+            "cloudStatus": cloud_status,
             "clearPixelPercent": round(clear_fraction * 100, 1) if clear_fraction is not None else None,
             "validPixelCount": clear_count,
             "reliability": reliability,
@@ -877,6 +891,8 @@ def parse_statistical_response(raw: dict[str, Any]) -> dict[str, Any] | None:
         "mission": MISSION,
         "spatialResolutionMeters": RESOLUTION_M,
         "cloudMaskingMethod": CLOUD_MASK_METHOD,
+        "cloudFilter": "leastCC (выборка наименее облачного снимка за 10 дней из каталога Sentinel-2)",
+        "cloudScope": "Строго в границах контура поля (SCL классификатор ESA 10м)",
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "periodStart": observations[0]["date"],
         "periodEnd": observations[-1]["periodEnd"],
@@ -943,89 +959,176 @@ def _build_grid_cells(boundary: list[dict[str, float]], cols: int, rows: int) ->
     return cells
 
 
-def _cache_key(boundary: list[dict[str, float]], cols: int, rows: int) -> str:
+def _cache_key(boundary: list[dict[str, float]], cols: int, rows: int, target_date: str | None = None) -> str:
     pts = ";".join(f"{p['latitude']:.7f},{p['longitude']:.7f}" for p in boundary)
-    return f"{cols}x{rows}|{pts}"
+    date_part = f"|date={target_date}" if target_date else ""
+    return f"{cols}x{rows}|{pts}{date_part}"
+
+
+def _raw_grid_key(boundary: list[dict[str, float]], cols: int, rows: int) -> str:
+    pts = ";".join(f"{p['latitude']:.7f},{p['longitude']:.7f}" for p in boundary)
+    return f"raw_{cols}x{rows}|{pts}"
 
 
 async def fetch_field_risk_grid(
     boundary: list[dict[str, float]],
     cols: int = 4,
     rows: int = 4,
+    target_date: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Реальная под-участковая выборка Sentinel-2 по регулярной сетке внутри поля.
     Каждая ячейка — отдельный запрос статистики NDVI/NDMI в Sentinel Hub.
-    Возвращает реальные значения по ячейкам и средние по полю, либо None,
-    если нет credentials / нет валидных данных (тогда очаги честно не строятся).
+    Поддерживает выбор целевого периода: пик вегетации ('peak'), текущее состояние ('latest')
+    или конкретная декада (YYYY-MM-DD).
     """
     if not boundary or len(boundary) < 3:
         return None
 
-    key = _cache_key(boundary, cols, rows)
     now = time.time()
-    cached = _grid_cache.get(key)
+    result_key = _cache_key(boundary, cols, rows, target_date)
+    cached = _grid_cache.get(result_key)
     if cached and (now - cached[0]) < _GRID_TTL_SECONDS:
         return cached[1]
 
-    disk_fresh = _disk_cache_read("grid", key, _GRID_TTL_SECONDS)
+    disk_fresh = _disk_cache_read("grid", result_key, _GRID_TTL_SECONDS)
     if disk_fresh:
-        _grid_cache[key] = (now, disk_fresh)
+        _grid_cache[result_key] = (now, disk_fresh)
         return disk_fresh
 
-    token = await get_copernicus_token()
-    if not token:
-        stale = _disk_cache_read("grid", key, float("inf"))
+    raw_key = _raw_grid_key(boundary, cols, rows)
+    raw_cells = _disk_cache_read("grid_raw", raw_key, _GRID_TTL_SECONDS)
+
+    if not raw_cells:
+        token = await get_copernicus_token()
+        if not token:
+            stale = _disk_cache_read("grid", result_key, float("inf"))
+            return {**stale, "stale": True} if stale else None
+
+        cells = _build_grid_cells(boundary, cols, rows)
+        if not cells:
+            return None
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def sample(cell: dict[str, Any]) -> None:
+            try:
+                async with semaphore:
+                    series = await query_sentinel_hub_statistical(token, cell["boundary"])
+            except Exception:
+                series = None
+            cell["observations"] = series.get("observations", []) if series else []
+
+        await asyncio.gather(*(sample(cell) for cell in cells))
+        raw_cells = cells
+        _disk_cache_write("grid_raw", raw_key, raw_cells)
+
+    # Calculate summaries across all intervals with sufficient spatial coverage
+    cells = [dict(c) for c in raw_cells]
+    total_area = sum(c.get("areaHa", 0.0) for c in cells)
+    all_dates = sorted({o["date"] for c in cells for o in c.get("observations", [])}, reverse=True)
+
+    date_summaries: list[dict[str, Any]] = []
+    for d in all_dates:
+        covered = [
+            c for c in cells
+            if any(o["date"] == d and o.get("reliability") == "high" for o in c.get("observations", []))
+        ]
+        if len(covered) >= 2 and total_area > 0 and sum(c["areaHa"] for c in covered) >= total_area * 0.5:
+            covered_area = sum(c["areaHa"] for c in covered)
+            weighted_ndvi = sum(
+                (next(o for o in c["observations"] if o["date"] == d).get("ndviMedian")
+                 or next(o for o in c["observations"] if o["date"] == d).get("ndviMean", 0.0)) * c["areaHa"]
+                for c in covered
+            )
+            mean_val = round(weighted_ndvi / covered_area, 3)
+            p_end = next((o.get("periodEnd") for c in covered for o in c["observations"] if o["date"] == d), None)
+            date_summaries.append({
+                "date": d,
+                "periodEnd": p_end,
+                "meanNdvi": mean_val,
+                "coveredAreaHa": round(covered_area, 1),
+            })
+
+    if not date_summaries:
+        stale = _disk_cache_read("grid", result_key, float("inf"))
         return {**stale, "stale": True} if stale else None
 
-    cells = _build_grid_cells(boundary, cols, rows)
-    if not cells:
-        return None
+    # Identify peak date and latest date
+    peak_item = max(date_summaries, key=lambda item: item["meanNdvi"])
+    latest_item = date_summaries[0]
+    peak_date = peak_item["date"]
+    peak_ndvi = peak_item["meanNdvi"]
+    latest_date = latest_item["date"]
+    latest_ndvi = latest_item["meanNdvi"]
+    is_post_harvest = latest_ndvi < 0.25 and peak_ndvi >= 0.45
 
-    semaphore = asyncio.Semaphore(4)
+    # Determine chosen observation date
+    chosen_summary = None
+    if target_date == "peak":
+        chosen_summary = peak_item
+        period_mode = "peak"
+    elif target_date == "latest":
+        chosen_summary = latest_item
+        period_mode = "latest"
+    elif target_date:
+        chosen_summary = next((item for item in date_summaries if item["date"] == target_date), None)
+        period_mode = "custom"
 
-    async def sample(cell: dict[str, Any]) -> None:
-        try:
-            async with semaphore:
-                series = await query_sentinel_hub_statistical(token, cell["boundary"])
-        except Exception:
-            series = None
-        cell["ndvi"] = None
-        cell["ndmi"] = None
-        cell["observations"] = series.get("observations", []) if series else []
+    if not chosen_summary:
+        chosen_summary = latest_item
+        period_mode = "latest"
 
-    await asyncio.gather(*(sample(cell) for cell in cells))
+    observation_date = chosen_summary["date"]
+    chosen_period_end = chosen_summary["periodEnd"]
 
-    # Compare cells from the same interval; never mix summer and autumn values.
-    dates = sorted({o["date"] for c in cells for o in c["observations"]}, reverse=True)
-    observation_date = None
-    total_area = sum(c["areaHa"] for c in cells)
-    for date in dates:
-        covered = [c for c in cells if any(o["date"] == date and o.get("reliability") == "high" for o in c["observations"])]
-        if len(covered) >= 2 and sum(c["areaHa"] for c in covered) >= total_area * 0.6:
-            observation_date = date
-            break
-    for cell in cells:
-        last = next((o for o in cell.pop("observations") if o["date"] == observation_date and o.get("reliability") == "high"), None)
-        if last:
-            cell["ndvi"] = last["ndviMedian"] if last.get("ndviMedian") is not None else last["ndviMean"]
-            cell["ndmi"] = last.get("ndmiMean")
-            cell["periodEnd"] = last.get("periodEnd")
+    # Assign cell values for the chosen observation date
+    populated_cells: list[dict[str, Any]] = []
+    for c in cells:
+        c_copy = {k: v for k, v in c.items() if k != "observations"}
+        obs = next((o for o in c.get("observations", []) if o["date"] == observation_date and o.get("reliability") == "high"), None)
+        if obs:
+            c_copy["ndvi"] = obs.get("ndviMedian") if obs.get("ndviMedian") is not None else obs.get("ndviMean")
+            c_copy["ndmi"] = obs.get("ndmiMean")
+            c_copy["periodEnd"] = obs.get("periodEnd")
+            populated_cells.append(c_copy)
 
-    valid = [c for c in cells if isinstance(c.get("ndvi"), (int, float))]
+    valid = [c for c in populated_cells if isinstance(c.get("ndvi"), (int, float))]
     if len(valid) < 2:
-        stale = _disk_cache_read("grid", key, float("inf"))
+        stale = _disk_cache_read("grid", result_key, float("inf"))
         return {**stale, "stale": True} if stale else None
+
     covered_area = sum(c["areaHa"] for c in valid)
     mean_ndvi = round(sum(c["ndvi"] * c["areaHa"] for c in valid) / covered_area, 3)
     ndmi_cells = [c for c in valid if isinstance(c.get("ndmi"), (int, float))]
     mean_ndmi = round(sum(c["ndmi"] * c["areaHa"] for c in ndmi_cells) / sum(c["areaHa"] for c in ndmi_cells), 3) if ndmi_cells else None
 
+    if mean_ndvi >= 0.60:
+        growth_phase = "Пик вегетации (колошение / налив зерна)"
+    elif 0.35 <= mean_ndvi < 0.60:
+        growth_phase = "Созревание / подсыхание культуры"
+    elif 0.22 <= mean_ndvi < 0.35:
+        growth_phase = "Всходы / кущение"
+    else:
+        growth_phase = "Пост-уборочное состояние (стерня / почва)"
+
+    available_periods = [
+        {
+            "date": item["date"],
+            "periodEnd": item["periodEnd"],
+            "meanNdvi": item["meanNdvi"],
+            "isPeak": item["date"] == peak_date,
+            "isLatest": item["date"] == latest_date,
+            "label": f"{item['date'][5:]} · NDVI {item['meanNdvi']:.2f}" + (" (пик)" if item["date"] == peak_date else " (текущее)" if item["date"] == latest_date else ""),
+        }
+        for item in date_summaries
+    ]
+
     result = {
         "qualityVersion": 2,
         "stale": False,
         "observationDate": observation_date,
-        "periodEnd": valid[0].get("periodEnd"),
+        "periodEnd": chosen_period_end or valid[0].get("periodEnd"),
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "coveragePercent": round(covered_area / total_area * 100, 1) if total_area else 0,
         "cells": valid,
@@ -1034,7 +1137,15 @@ async def fetch_field_risk_grid(
         "meanNdmi": mean_ndmi,
         "source": "Copernicus Data Space Ecosystem (Sentinel Hub Statistical API)",
         "gridSize": f"{cols}×{rows}",
+        "peakDate": peak_date,
+        "peakNdvi": peak_ndvi,
+        "latestDate": latest_date,
+        "latestNdvi": latest_ndvi,
+        "isPostHarvest": is_post_harvest,
+        "growthPhase": growth_phase,
+        "periodMode": period_mode,
+        "availablePeriods": available_periods,
     }
-    _grid_cache[key] = (now, result)
-    _disk_cache_write("grid", key, result)
+    _grid_cache[result_key] = (now, result)
+    _disk_cache_write("grid", result_key, result)
     return result

@@ -40,6 +40,7 @@ import { fontFamilies } from '../../src/theme/typography';
 import { confirmDestructive, notify } from '../../src/utils/notify';
 import {
   AgroWeather,
+  AvailablePeriod,
   ClimateRiskForecast,
   Field,
   FieldOperationsRecommendation,
@@ -313,16 +314,28 @@ function IndexHistory({ observations }: { observations: SatelliteObservation[] }
         <Text style={[historyStyles.headerCell, historyStyles.dateCell]}>Дата</Text>
         <Text style={historyStyles.headerCell}>NDVI</Text>
         <Text style={historyStyles.headerCell}>NDMI</Text>
-        <Text style={historyStyles.headerCell}>Облака</Text>
+        <Text style={historyStyles.headerCell}>Облака над полем</Text>
       </View>
       {recent.map((item, index) => (
         <View key={`row-${item.date}-${index}`} style={[historyStyles.tableRow, index > 0 && historyStyles.tableDivider]}>
           <Text style={[historyStyles.valueCell, historyStyles.dateCell]}>{item.date}</Text>
           <Text style={historyStyles.valueCell}>{item.ndviMean.toFixed(2)}</Text>
           <Text style={historyStyles.valueCell}>{item.ndmiMean == null ? '—' : item.ndmiMean.toFixed(2)}</Text>
-          <Text style={historyStyles.valueCell}>{measurement(item.cloudCoveragePercent, '%', 0)}</Text>
+          <View style={{ flex: 1, alignItems: 'flex-end' }}>
+            <Text style={historyStyles.valueCell}>
+              {item.cloudCoveragePercent == null ? '—' : `${item.cloudCoveragePercent.toFixed(0)}%`}
+            </Text>
+            {item.cloudStatus ? (
+              <Text style={historyStyles.cloudStatusText}>{item.cloudStatus}</Text>
+            ) : null}
+          </View>
         </View>
       ))}
+      <View style={historyStyles.cloudFootnote}>
+        <Text style={historyStyles.cloudFootnoteText}>
+          Sentinel-2 L2A · leastCC: выбирается наименее облачный пролёт за 10 дней. Облачность измеряется строго в контуре поля по классификатору ESA SCL (10 м).
+        </Text>
+      </View>
     </Card>
   );
 }
@@ -345,6 +358,9 @@ const historyStyles = StyleSheet.create({
   headerCell: { flex: 1, textAlign: 'right', fontFamily: fontFamilies.semiBold, fontSize: 10.5, color: colors.textSecondary },
   valueCell: { flex: 1, textAlign: 'right', fontFamily: fontFamilies.medium, fontSize: 11.5, color: colors.text },
   dateCell: { flex: 1.45, textAlign: 'left' },
+  cloudStatusText: { fontSize: 9.5, fontFamily: fontFamilies.regular, color: colors.muted, textAlign: 'right' },
+  cloudFootnote: { paddingHorizontal: 14, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  cloudFootnoteText: { fontFamily: fontFamilies.regular, fontSize: 10.5, color: colors.muted, lineHeight: 15 },
 });
 
 // ---------------------------------------------------------------------------
@@ -377,6 +393,8 @@ export default function FieldScreen() {
   const [mapMode, setMapMode] = useState<MapMode>('zones');
   const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
   const [selectedZone, setSelectedZone] = useState<RiskZone | null>(initialZones?.zones?.[0] ?? null);
+  const [selectedPeriod, setSelectedPeriod] = useState<string | null>(null); // null = default (latest from backend)
+  const [periodLoading, setPeriodLoading] = useState(false);
   const [loading, setLoading] = useState(!initialField);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -457,6 +475,22 @@ export default function FieldScreen() {
     } finally {
       setRefreshing(false);
       isLoadingRef.current = false;
+    }
+  }, [id]);
+
+  // Fetch zones for a specific period (peak / latest / custom date)
+  const fetchZonesForPeriod = useCallback(async (date: string) => {
+    if (!id) return;
+    setPeriodLoading(true);
+    setSelectedPeriod(date);
+    try {
+      const value = await getFieldZones(id, date);
+      setZonesData(value);
+      setSelectedZone(value.zones[0] ?? null);
+    } catch {
+      // keep existing data on error
+    } finally {
+      setPeriodLoading(false);
     }
   }, [id]);
 
@@ -718,6 +752,9 @@ export default function FieldScreen() {
               <View style={styles.satStatCell}>
                 <Text style={styles.satStatVal}>{measurement(latestObs.cloudCoveragePercent, '%', 0)}</Text>
                 <Text style={styles.satStatLabel}>Облачность</Text>
+                {latestObs.cloudStatus ? (
+                  <Text style={styles.satObsCloud}>{latestObs.cloudStatus}</Text>
+                ) : null}
               </View>
             </View>
             <View style={styles.hairline} />
@@ -1050,6 +1087,58 @@ export default function FieldScreen() {
 
       {/* ── 4. MAP ─────────────────────────────────────────────── */}
       <SectionLabel title="КАРТА УЧАСТКА" />
+
+      {/* Post-harvest banner */}
+      {zonesData?.isPostHarvest && zonesData.postHarvestNotice && (
+        <Card style={styles.postHarvestCard}>
+          <Text style={styles.postHarvestText}>{zonesData.postHarvestNotice}</Text>
+        </Card>
+      )}
+
+      {/* Period selector for NDVI grid */}
+      {zonesData?.availablePeriods && zonesData.availablePeriods.length > 1 && (
+        <>
+          <Text style={styles.periodSelectorLabel}>ПЕРИОД АНАЛИЗА СЕТКИ</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.periodSelectorRow}
+          >
+            {zonesData.availablePeriods.map((p) => {
+              const isActive = selectedPeriod
+                ? p.date === selectedPeriod
+                : p.isLatest;
+              return (
+                <Pressable
+                  key={p.date}
+                  onPress={() => void fetchZonesForPeriod(p.isPeak ? 'peak' : p.isLatest ? 'latest' : p.date)}
+                  style={({ pressed }) => [
+                    styles.periodChip,
+                    isActive && styles.periodChipActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={[styles.periodChipText, isActive && styles.periodChipTextActive]}>
+                    {p.isPeak ? '🌾 ' : p.isLatest ? '📡 ' : ''}{p.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {periodLoading && (
+            <View style={styles.periodLoadingRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.periodLoadingText}>Загрузка сетки…</Text>
+            </View>
+          )}
+        </>
+      )}
+
+      {/* Growth phase badge */}
+      {zonesData?.growthPhase && (
+        <Text style={styles.growthPhaseLabel}>{zonesData.growthPhase}</Text>
+      )}
+
       {zonesData?.status === 'ready' && (
         <Text style={styles.pendingText}>
           {zonesData.stale ? 'Сохранённая сетка. ' : ''}
@@ -1846,4 +1935,28 @@ const styles = StyleSheet.create({
   inspDeletePressed: { backgroundColor: colors.dangerSoft },
   inspDeleteText: { fontFamily: fontFamilies.semiBold, fontSize: 12, color: colors.danger },
   inspDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: 72 },
+
+  // Post-harvest notice card
+  postHarvestCard: { padding: 12, backgroundColor: '#FEF3C7', borderWidth: StyleSheet.hairlineWidth, borderColor: '#F59E0B' },
+  postHarvestText: { fontFamily: fontFamilies.regular, fontSize: 12.5, color: '#78350F', lineHeight: 18 },
+
+  // Period selector
+  periodSelectorLabel: { fontFamily: fontFamilies.semiBold, fontSize: 10.5, color: colors.textSecondary, letterSpacing: 0.5, marginHorizontal: 16, marginTop: 8, marginBottom: 2 },
+  periodSelectorRow: { paddingHorizontal: 14, paddingVertical: 6, gap: 8 },
+  periodChip: {
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  periodChipActive: { backgroundColor: '#E7F3EB', borderColor: colors.primary },
+  periodChipText: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.textSecondary },
+  periodChipTextActive: { color: colors.primary, fontFamily: fontFamilies.semiBold },
+  periodLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 4 },
+  periodLoadingText: { fontFamily: fontFamilies.regular, fontSize: 12, color: colors.textSecondary },
+
+  // Growth phase label
+  growthPhaseLabel: { fontFamily: fontFamilies.medium, fontSize: 12, color: colors.primary, marginHorizontal: 16, marginBottom: 4 },
 });

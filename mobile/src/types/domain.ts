@@ -136,6 +136,8 @@ export type SatelliteObservation = {
   ndviMedian: number | null;
   ndmiMean: number | null;
   cloudCoveragePercent: number | null;
+  /** Human-readable cloud status label from ESA SCL classifier */
+  cloudStatus?: string | null;
   clearPixelPercent?: number | null;
   reliability?: 'high' | 'medium' | 'low' | 'unknown';
   ndviSpread?: number | null;
@@ -199,6 +201,15 @@ export type NdviCell = {
   color: string;
 };
 
+export type AvailablePeriod = {
+  date: string;
+  periodEnd?: string;
+  meanNdvi: number;
+  isPeak: boolean;
+  isLatest: boolean;
+  label: string;
+};
+
 export type ZonesData = {
   stale?: boolean;
   observationDate?: string;
@@ -221,6 +232,16 @@ export type ZonesData = {
   benchmark: BenchmarkData | null;
   ndviGrid: NdviCell[];
   ndviRange: { min: number; max: number } | null;
+  /** Multi-period support */
+  peakDate?: string | null;
+  peakNdvi?: number | null;
+  latestDate?: string | null;
+  latestNdvi?: number | null;
+  growthPhase?: string | null;
+  isPostHarvest?: boolean;
+  postHarvestNotice?: string | null;
+  periodMode?: 'peak' | 'latest' | 'custom';
+  availablePeriods?: AvailablePeriod[];
 };
 
 export type LandUseClassification = {

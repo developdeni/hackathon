@@ -1721,11 +1721,15 @@ async def get_field_satellite(field_id: str, user_id: str = Depends(require_user
 
 
 @app.get("/api/fields/{field_id}/zones")
-async def get_field_zones(field_id: str, user_id: str = Depends(require_user)) -> dict:
+async def get_field_zones(
+    field_id: str,
+    date: str | None = None,
+    user_id: str = Depends(require_user),
+) -> dict:
     with connect() as connection:
         row = _load_owned_field(connection, field_id, user_id)
     field = field_from_row(row)
-    grid = await fetch_field_risk_grid(field["boundary"])
+    grid = await fetch_field_risk_grid(field["boundary"], target_date=date)
     return build_risk_zones(field_id, field["name"], field["areaHa"], grid)
 
 

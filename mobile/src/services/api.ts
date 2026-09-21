@@ -27,6 +27,7 @@ import {
   YieldHistoryRecord,
   YieldHistorySource,
   ZonesData,
+  AvailablePeriod,
   AiFarmSummary,
   AiFieldBadge,
 } from '../types/domain';
@@ -587,11 +588,15 @@ export async function getFieldSatellite(fieldId: string): Promise<SatelliteData>
   }
 }
 
-export async function getFieldZones(fieldId: string): Promise<ZonesData> {
+export async function getFieldZones(fieldId: string, date?: string): Promise<ZonesData> {
   const cacheKey = CACHE_KEYS.ZONES(fieldId);
   try {
-    const data = await apiFetch<ZonesData>(`/api/fields/${encodeURIComponent(fieldId)}/zones`, undefined, 70_000, 0);
-    void saveLocalCache(cacheKey, data);
+    const url = date
+      ? `/api/fields/${encodeURIComponent(fieldId)}/zones?date=${encodeURIComponent(date)}`
+      : `/api/fields/${encodeURIComponent(fieldId)}/zones`;
+    const data = await apiFetch<ZonesData>(url, undefined, 70_000, 0);
+    // Only save to cache when fetching latest (no custom date), to avoid overwriting with stale peak data
+    if (!date || date === 'latest') void saveLocalCache(cacheKey, data);
     return data;
   } catch (err) {
     const cached = await getLocalCache<ZonesData>(cacheKey);

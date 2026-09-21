@@ -82,6 +82,8 @@ class QualityTests(unittest.TestCase):
         result = copernicus.parse_statistical_response({"data": [interval()]})
         observation = result["observations"][0]
         self.assertEqual(observation["cloudCoveragePercent"], 10)
+        self.assertEqual(observation["cloudStatus"], "10.0% · Рассеянная облачность")
+        self.assertEqual(result["cloudFilter"], "leastCC (выборка наименее облачного снимка за 10 дней из каталога Sentinel-2)")
         self.assertEqual(observation["clearPixelPercent"], 80)
         self.assertEqual(observation["validPixelCount"], 80)
         self.assertEqual(observation["periodEnd"], "2026-07-11")
@@ -354,4 +356,60 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
 
         # 3. No duplicate consecutive user turns at the end
         self.assertEqual(len(contents), 3)
+
+    def test_parse_statistical_response_sets_cloud_status_labels(self):
+        raw_clear = {"data": [interval(mean=0.6, clear=0.98, cloudy=0.0)]}
+        obs_clear = copernicus.parse_statistical_response(raw_clear)
+        self.assertEqual(obs_clear["observations"][0]["cloudStatus"], "0% · Ясно над полем")
+
+        raw_shadows = {"data": [interval(mean=0.55, clear=0.96, cloudy=0.035)]}
+        obs_shadows = copernicus.parse_statistical_response(raw_shadows)
+        self.assertEqual(obs_shadows["observations"][0]["cloudStatus"], "3.5% · Тени/дымка")
+
+        raw_partly = {"data": [interval(mean=0.45, clear=0.85, cloudy=0.15)]}
+        obs_partly = copernicus.parse_statistical_response(raw_partly)
+        self.assertEqual(obs_partly["observations"][0]["cloudStatus"], "15.0% · Рассеянная облачность")
+
+        raw_cloudy = {"data": [interval(mean=0.35, clear=0.70, cloudy=0.25)]}
+        obs_cloudy = copernicus.parse_statistical_response(raw_cloudy)
+        self.assertEqual(obs_cloudy["observations"][0]["cloudStatus"], "25.0% · Облачно")
+
+    async def test_grid_supports_peak_and_latest_periods(self):
+        cells = [{"row": 0, "col": i, "areaHa": 10, "boundary": [], "centroid": {}} for i in range(2)]
+        obs_mock = [
+            {"date": "2026-07-15", "periodEnd": "2026-07-25", "ndviMean": 0.75, "reliability": "high"},
+            {"date": "2026-09-01", "periodEnd": "2026-09-10", "ndviMean": 0.22, "reliability": "high"},
+        ]
+        series = [{"observations": obs_mock}, {"observations": obs_mock}]
+        boundary = [{"latitude": 53, "longitude": 69}, {"latitude": 54, "longitude": 69}, {"latitude": 54, "longitude": 70}]
+        with (
+            patch.object(copernicus, "_grid_cache", {}),
+            patch.object(copernicus, "_disk_cache_read", return_value=None),
+            patch.object(copernicus, "_disk_cache_write"),
+            patch.object(copernicus, "get_copernicus_token", AsyncMock(return_value="test")),
+            patch.object(copernicus, "_build_grid_cells", return_value=copy.deepcopy(cells)),
+            patch.object(copernicus, "query_sentinel_hub_statistical", AsyncMock(side_effect=series)),
+        ):
+            res_latest = await copernicus.fetch_field_risk_grid(boundary, target_date="latest")
+            self.assertEqual(res_latest["observationDate"], "2026-09-01")
+            self.assertEqual(res_latest["meanNdvi"], 0.22)
+            self.assertTrue(res_latest["isPostHarvest"])
+            self.assertEqual(res_latest["peakDate"], "2026-07-15")
+            self.assertEqual(res_latest["peakNdvi"], 0.75)
+            self.assertEqual(res_latest["latestDate"], "2026-09-01")
+            self.assertEqual(res_latest["latestNdvi"], 0.22)
+            self.assertGreaterEqual(len(res_latest["availablePeriods"]), 2)
+
+        with (
+            patch.object(copernicus, "_grid_cache", {}),
+            patch.object(copernicus, "_disk_cache_read", return_value=None),
+            patch.object(copernicus, "_disk_cache_write"),
+            patch.object(copernicus, "get_copernicus_token", AsyncMock(return_value="test")),
+            patch.object(copernicus, "_build_grid_cells", return_value=copy.deepcopy(cells)),
+            patch.object(copernicus, "query_sentinel_hub_statistical", AsyncMock(side_effect=series)),
+        ):
+            res_peak = await copernicus.fetch_field_risk_grid(boundary, target_date="peak")
+            self.assertEqual(res_peak["observationDate"], "2026-07-15")
+            self.assertEqual(res_peak["meanNdvi"], 0.75)
+            self.assertEqual(res_peak["periodMode"], "peak")
 

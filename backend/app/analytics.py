@@ -121,6 +121,15 @@ def _pending(field_id: str, field_name: str, area_ha: float) -> dict[str, Any]:
         "benchmark": None,
         "ndviGrid": [],
         "ndviRange": None,
+        "peakDate": None,
+        "peakNdvi": None,
+        "latestDate": None,
+        "latestNdvi": None,
+        "growthPhase": None,
+        "isPostHarvest": False,
+        "postHarvestNotice": None,
+        "periodMode": "latest",
+        "availablePeriods": [],
     }
 
 
@@ -210,6 +219,14 @@ def build_risk_zones(
         },
     } if zones else None
 
+    post_harvest_notice = None
+    if grid.get("isPostHarvest"):
+        if grid.get("periodMode") == "latest" or grid.get("observationDate") == grid.get("latestDate"):
+            post_harvest_notice = (
+                f"Снимок {grid.get('observationDate')} отражает послеуборочное состояние поля (стерня/почва, NDVI {mean_ndvi:.2f}). "
+                f"Очаги дефицита биомассы в этот период не актуальны. Для анализа стресса культуры переключитесь на пик вегетации ({grid.get('peakDate')}, NDVI {grid.get('peakNdvi', 0.0):.2f})."
+            )
+
     return {
         "fieldId": field_id,
         "fieldName": field_name,
@@ -232,4 +249,13 @@ def build_risk_zones(
         "benchmark": benchmark,
         "ndviGrid": ndvi_grid,
         "ndviRange": ndvi_range,
+        "peakDate": grid.get("peakDate"),
+        "peakNdvi": grid.get("peakNdvi"),
+        "latestDate": grid.get("latestDate"),
+        "latestNdvi": grid.get("latestNdvi"),
+        "growthPhase": grid.get("growthPhase"),
+        "isPostHarvest": grid.get("isPostHarvest", False),
+        "postHarvestNotice": post_harvest_notice,
+        "periodMode": grid.get("periodMode", "latest"),
+        "availablePeriods": grid.get("availablePeriods", []),
     }
