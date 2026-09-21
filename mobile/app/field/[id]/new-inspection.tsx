@@ -4,6 +4,7 @@ import {
   Alert,
   Image,
   ImageStyle,
+  Linking,
   Pressable,
   StyleSheet,
   View,
@@ -17,6 +18,7 @@ import { Card } from '../../../src/components/Card';
 import { Screen } from '../../../src/components/Screen';
 import {
   cancelNativeOrWebRecording,
+  checkMicrophonePermission,
   startNativeOrWebRecording,
   stopNativeOrWebRecording,
 } from '../../../src/services/voice-recorder';
@@ -57,6 +59,24 @@ export default function NewInspectionScreen() {
   async function startVoiceRecording() {
     if (recording || transcribing) return;
     try {
+      const perm = await checkMicrophonePermission();
+      if (!perm.granted) {
+        Alert.alert(
+          'Доступ к микрофону',
+          'Для записи голосового осмотра Tanap AI требуется доступ к микрофону.\n\nРазрешите доступ в Настройках iOS.',
+          [
+            { text: 'Отмена', style: 'cancel' },
+            {
+              text: 'Открыть Настройки',
+              onPress: () => {
+                Linking.openSettings().catch(() => {});
+              },
+            },
+          ]
+        );
+        return;
+      }
+
       await startNativeOrWebRecording();
       setRecording(true);
       setRecordingSeconds(0);
@@ -65,8 +85,15 @@ export default function NewInspectionScreen() {
       }, 1000);
     } catch (err: any) {
       Alert.alert(
-        'Доступ к микрофону',
-        err?.message || 'Разрешите доступ к микрофону в Настройках устройства для записи голосового осмотра.'
+        'Микрофон',
+        err?.message || 'Не удалось активировать микрофон. Разрешите доступ в Настройках устройства.',
+        [
+          { text: 'Понятно', style: 'cancel' },
+          {
+            text: 'Настройки iOS',
+            onPress: () => Linking.openSettings().catch(() => {}),
+          },
+        ]
       );
     }
   }
@@ -82,6 +109,7 @@ export default function NewInspectionScreen() {
     try {
       const audioResult = await stopNativeOrWebRecording();
       if (!audioResult || !audioResult.audioBase64) {
+        Alert.alert('Запись не зафиксирована', 'Не удалось получить аудиозапись. Попробуйте наговорить еще раз.');
         return;
       }
       if (!fieldId) return;
@@ -96,7 +124,7 @@ export default function NewInspectionScreen() {
       }
     } catch (err) {
       Alert.alert(
-        'AI-обработка',
+        'AI-обработка отчёта',
         err instanceof Error ? err.message : 'Не удалось обработать аудио. Попробуйте еще раз.'
       );
     } finally {
@@ -145,12 +173,15 @@ export default function NewInspectionScreen() {
   async function takePhoto() {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert('Доступ ограничен', 'Разрешите доступ к камере в настройках устройства.');
+      Alert.alert('Доступ ограничен', 'Разрешите доступ к камере в настройках устройства.', [
+        { text: 'Отмена', style: 'cancel' },
+        { text: 'Открыть Настройки', onPress: () => Linking.openSettings().catch(() => {}) },
+      ]);
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes: ['images'],
-      quality: 0.82,
+      quality: 0.72,
       base64: true,
     });
     if (!result.canceled && result.assets[0]) {
@@ -162,12 +193,15 @@ export default function NewInspectionScreen() {
   async function pickPhoto() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert('Доступ ограничен', 'Разрешите доступ к фото в настройках устройства.');
+      Alert.alert('Доступ ограничен', 'Разрешите доступ к фото в настройках устройства.', [
+        { text: 'Отмена', style: 'cancel' },
+        { text: 'Открыть Настройки', onPress: () => Linking.openSettings().catch(() => {}) },
+      ]);
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      quality: 0.82,
+      quality: 0.72,
       base64: true,
     });
     if (!result.canceled && result.assets[0]) {

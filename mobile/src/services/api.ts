@@ -89,6 +89,9 @@ async function apiFetch<T>(
     const headers: Record<string, string> = {
       ...(init?.headers as Record<string, string> | undefined),
     };
+    if (typeof init?.body === 'string' && !headers['Content-Type'] && !headers['content-type']) {
+      headers['Content-Type'] = 'application/json';
+    }
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -560,8 +563,10 @@ export async function summarizeVoiceInspection(
     `/api/fields/${encodeURIComponent(fieldId)}/voice-inspection-summary`,
     {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
-    }
+    },
+    60_000
   );
 }
 

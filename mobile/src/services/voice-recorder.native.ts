@@ -1,10 +1,10 @@
 import {
   AudioModule,
-  RecordingPresets,
+  getRecordingPermissionsAsync,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from 'expo-audio';
-import { VoiceRecordingResult } from './voice-recorder';
+import { MicrophonePermissionResult, VoiceRecordingResult } from './voice-recorder';
 
 let activeRecorder: any = null;
 
@@ -12,30 +12,105 @@ function bufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
   const chunkSize = 8192;
-  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
     binary += String.fromCharCode.apply(null, chunk as any);
   }
   return btoa(binary);
 }
 
+/**
+ * Checks or requests microphone recording permissions on native iOS/Android
+ */
+export async function checkMicrophonePermission(): Promise<MicrophonePermissionResult> {
+  try {
+    const current = await getRecordingPermissionsAsync();
+    if (current.granted) {
+      return {
+        granted: true,
+        canAskAgain: true,
+        status: 'granted',
+      };
+    }
+
+    // If undetermined or can ask again, ask the system
+    if (current.status === 'undetermined' || current.canAskAgain !== false) {
+      const requested = await requestRecordingPermissionsAsync();
+      return {
+        granted: requested.granted,
+        canAskAgain: requested.canAskAgain ?? true,
+        status: requested.granted ? 'granted' : (requested.status as any),
+      };
+    }
+
+    return {
+      granted: false,
+      canAskAgain: false,
+      status: current.status as any,
+    };
+  } catch {
+    // Fallback: try direct request
+    try {
+      const requested = await requestRecordingPermissionsAsync();
+      return {
+        granted: requested.granted,
+        canAskAgain: requested.canAskAgain ?? true,
+        status: requested.granted ? 'granted' : 'denied',
+      };
+    } catch {
+      return {
+        granted: false,
+        canAskAgain: false,
+        status: 'denied',
+      };
+    }
+  }
+}
+
+/**
+ * Starts audio recording on iOS/Android device
+ */
 export async function startNativeOrWebRecording(): Promise<void> {
-  const perm = await requestRecordingPermissionsAsync();
+  const perm = await checkMicrophonePermission();
   if (!perm.granted) {
-    throw new Error('Разрешите доступ к микрофону в Настройках устройства для записи голосового отчета.');
+    throw new Error('Разрешите доступ к микрофону в Настройках устройства для записи голосового отчёта.');
   }
 
+  // Cancel any lingering recorder first
+  if (activeRecorder) {
+    try {
+      await activeRecorder.stop();
+    } catch {}
+    activeRecorder = null;
+  }
+
+  // Set audio session mode for recording
   await setAudioModeAsync({
     allowsRecording: true,
     playsInSilentMode: true,
   });
 
-  const recorder = new AudioModule.AudioRecorder(RecordingPresets.HIGH_QUALITY);
+  // Flat options matching Swift RecordingOptions: Record struct
+  const recordingOptions = {
+    extension: '.m4a',
+    sampleRate: 44100,
+    numberOfChannels: 1, // Mono voice memo (compact file, perfect for speech AI)
+    bitRate: 64000,      // 64kbps AAC -> ~480 KB per minute, well under 1 MB!
+    outputFormat: 'aac ',
+    audioQuality: 96,
+    isMeteringEnabled: false,
+  };
+
+  const recorder = new AudioModule.AudioRecorder(recordingOptions);
   await recorder.prepareToRecordAsync();
   recorder.record();
   activeRecorder = recorder;
 }
 
+/**
+ * Stops audio recording and returns base64 encoded audio
+ */
 export async function stopNativeOrWebRecording(): Promise<VoiceRecordingResult | null> {
   if (!activeRecorder) {
     return null;
@@ -44,7 +119,12 @@ export async function stopNativeOrWebRecording(): Promise<VoiceRecordingResult |
   const recorder = activeRecorder;
   activeRecorder = null;
 
-  await recorder.stop();
+  try {
+    await recorder.stop();
+  } catch (err) {
+    console.warn('Error stopping recorder:', err);
+  }
+
   const uri = recorder.uri;
   if (!uri) {
     return null;
@@ -53,21 +133,27 @@ export async function stopNativeOrWebRecording(): Promise<VoiceRecordingResult |
   let audioBase64 = '';
   try {
     const response = await fetch(uri);
-    const blob = await response.blob();
-    const base64Promise = new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        resolve(reader.result as string);
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-    audioBase64 = await base64Promise;
+    const arrayBuf = await response.arrayBuffer();
+    audioBase64 = bufferToBase64(arrayBuf);
   } catch {
-    const response = await fetch(uri);
-    const arrayBuffer = await response.arrayBuffer();
-    const b64 = bufferToBase64(arrayBuffer);
-    audioBase64 = `data:audio/m4a;base64,${b64}`;
+    // Fallback using FileReader
+    try {
+      const response = await fetch(uri);
+      const blob = await response.blob();
+      const base64Promise = new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const res = reader.result as string;
+          resolve(res.includes(',') ? res.split(',')[1] : res);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      audioBase64 = await base64Promise;
+    } catch (e) {
+      console.warn('Failed to convert audio to base64:', e);
+      return null;
+    }
   }
 
   return {
@@ -76,13 +162,14 @@ export async function stopNativeOrWebRecording(): Promise<VoiceRecordingResult |
   };
 }
 
+/**
+ * Cancels active recording without saving
+ */
 export async function cancelNativeOrWebRecording(): Promise<void> {
   if (activeRecorder) {
     try {
       await activeRecorder.stop();
-    } catch {
-      // ignore
-    }
+    } catch {}
     activeRecorder = null;
   }
 }

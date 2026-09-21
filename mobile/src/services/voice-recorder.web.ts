@@ -1,9 +1,38 @@
-import { VoiceRecordingResult } from './voice-recorder';
+import { MicrophonePermissionResult, VoiceRecordingResult } from './voice-recorder';
 
 let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
 let activeStream: MediaStream | null = null;
 let activeMimeType = 'audio/webm';
+
+export async function checkMicrophonePermission(): Promise<MicrophonePermissionResult> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    return {
+      granted: false,
+      canAskAgain: false,
+      status: 'denied',
+    };
+  }
+
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const p = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+      const mappedStatus: 'granted' | 'denied' | 'undetermined' =
+        p.state === 'granted' ? 'granted' : p.state === 'denied' ? 'denied' : 'undetermined';
+      return {
+        granted: p.state === 'granted',
+        canAskAgain: p.state !== 'denied',
+        status: mappedStatus,
+      };
+    }
+  } catch {}
+
+  return {
+    granted: true,
+    canAskAgain: true,
+    status: 'undetermined',
+  };
+}
 
 export async function startNativeOrWebRecording(): Promise<void> {
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {

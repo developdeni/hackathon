@@ -57,6 +57,12 @@
         {
           "locationWhenInUsePermission": "Разрешите сохранить координаты осмотра поля."
         }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Tanap AI использует микрофон для записи голосовых отчётов агронома и их AI-анализа."
+        }
       ]
     ],
     "assetBundlePatterns": [

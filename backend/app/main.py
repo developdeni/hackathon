@@ -2117,33 +2117,62 @@ async def summarize_voice_inspection(
         field_row, _is_owner, _perms = _load_accessible_field(connection, field_id, user_id, need="inspect")
         field_data = field_from_row(field_row)
 
-    content_type = request.headers.get("content-type", "")
+    content_type = request.headers.get("content-type", "").lower()
     audio_bytes: bytes | None = None
-    mime_type = "audio/webm"
+    mime_type = "audio/m4a"
     text_notes: str | None = None
+    body_data: dict | None = None
 
+    # 1. Try parsing JSON (by header or by inspecting raw body for JSON structure)
     if "application/json" in content_type:
-        body = await request.json()
-        b64 = body.get("audioBase64") or body.get("audio_base64")
-        text_notes = body.get("textNotes") or body.get("text_notes")
-        mime_type = body.get("mimeType") or body.get("mime_type") or "audio/webm"
-        if b64:
+        try:
+            body_data = await request.json()
+        except Exception:
+            body_data = None
+
+    if body_data is None and "multipart/form-data" not in content_type:
+        try:
+            raw_body = await request.body()
+            if raw_body and (raw_body.strip().startswith(b"{") or raw_body.strip().startswith(b"[")):
+                import json
+                body_data = json.loads(raw_body.decode("utf-8", errors="ignore"))
+        except Exception:
+            body_data = None
+
+    if body_data and isinstance(body_data, dict):
+        b64 = body_data.get("audioBase64") or body_data.get("audio_base64")
+        text_notes = body_data.get("textNotes") or body_data.get("text_notes")
+        mime_type = body_data.get("mimeType") or body_data.get("mime_type") or "audio/m4a"
+        if b64 and isinstance(b64, str):
             import base64
             if "," in b64:
                 header, b64 = b64.split(",", 1)
                 if "audio/" in header:
-                    mime_type = header.split(";")[0].replace("data:", "")
+                    mime_type = header.split(";")[0].replace("data:", "").strip()
             try:
                 audio_bytes = base64.b64decode(b64)
             except Exception:
                 raise HTTPException(status_code=400, detail="Неверный формат base64 аудио")
-    else:
-        form = await request.form()
-        audio_field = form.get("audio") or form.get("file")
-        if audio_field and hasattr(audio_field, "read"):
-            audio_bytes = await audio_field.read()
-            mime_type = getattr(audio_field, "content_type", None) or "audio/webm"
-        text_notes = form.get("text_notes") or form.get("textNotes")
+
+    # 2. Try multipart form
+    if audio_bytes is None and not text_notes:
+        try:
+            form = await request.form()
+            audio_field = form.get("audio") or form.get("file")
+            if audio_field and hasattr(audio_field, "read"):
+                audio_bytes = await audio_field.read()
+                mime_type = getattr(audio_field, "content_type", None) or "audio/m4a"
+            text_notes = form.get("text_notes") or form.get("textNotes")
+        except Exception:
+            pass
+
+    # 3. Try raw binary audio payload
+    if audio_bytes is None and not text_notes:
+        raw_body = await request.body()
+        if raw_body and len(raw_body) > 32 and not raw_body.startswith(b"{"):
+            audio_bytes = raw_body
+            if "audio/" in content_type:
+                mime_type = content_type.split(";")[0].strip()
 
     if not audio_bytes and text_notes:
         summary = ai_advisor.process_agronomic_text_report(str(text_notes), field_context=field_data)
