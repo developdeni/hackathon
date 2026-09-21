@@ -11,6 +11,7 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSCameraUsageDescription": "Tanap AI использует камеру для фотографий во время осмотра поля.",
+        "NSMicrophoneUsageDescription": "Tanap AI использует микрофон для записи голосовых осмотров полей.",
         "NSPhotoLibraryUsageDescription": "Tanap AI использует выбранные фотографии для сохранения осмотра поля.",
         "NSLocationWhenInUseUsageDescription": "Tanap AI может сохранить координаты осмотра по вашему запросу.",
         "NSLocalNetworkUsageDescription": "Tanap AI подключается к локальному серверу хозяйства в вашей Wi-Fi сети.",

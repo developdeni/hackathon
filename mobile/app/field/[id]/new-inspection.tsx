@@ -15,6 +15,11 @@ import * as Location from 'expo-location';
 
 import { Card } from '../../../src/components/Card';
 import { Screen } from '../../../src/components/Screen';
+import {
+  cancelNativeOrWebRecording,
+  startNativeOrWebRecording,
+  stopNativeOrWebRecording,
+} from '../../../src/services/voice-recorder';
 import { createInspection, summarizeVoiceInspection } from '../../../src/services/api';
 import { colors } from '../../../src/theme/colors';
 import { fontFamilies, typography } from '../../../src/theme/typography';
@@ -40,78 +45,52 @@ export default function NewInspectionScreen() {
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
-  const mediaRecorderRef = useRef<any>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<any>(null);
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      cancelNativeOrWebRecording().catch(() => {});
     };
   }, []);
 
   async function startVoiceRecording() {
     if (recording || transcribing) return;
     try {
-      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-        Alert.alert('Запись недоступна', 'Микрофон не поддерживается в текущем браузере.');
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioChunksRef.current = [];
-      const mimeType =
-        typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm')
-          ? 'audio/webm'
-          : 'audio/ogg';
-      const recorder = new MediaRecorder(stream);
-      recorder.ondataavailable = (event: any) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((track: any) => track.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        await handleAudioBlob(audioBlob, mimeType);
-      };
-      mediaRecorderRef.current = recorder;
-      recorder.start(250);
+      await startNativeOrWebRecording();
       setRecording(true);
       setRecordingSeconds(0);
       timerRef.current = setInterval(() => {
         setRecordingSeconds((prev) => prev + 1);
       }, 1000);
-    } catch {
-      Alert.alert('Доступ к микрофону', 'Разрешите доступ к микрофону для записи голосового осмотра.');
+    } catch (err: any) {
+      Alert.alert(
+        'Доступ к микрофону',
+        err?.message || 'Разрешите доступ к микрофону в Настройках устройства для записи голосового осмотра.'
+      );
     }
   }
 
-  function stopVoiceRecording() {
+  async function stopVoiceRecording() {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
     setRecording(false);
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-  }
-
-  async function handleAudioBlob(blob: Blob, mimeType: string) {
-    if (!fieldId) return;
     setTranscribing(true);
-    try {
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve, reject) => {
-        reader.onloadend = () => {
-          resolve(reader.result as string);
-        };
-        reader.onerror = reject;
-      });
-      reader.readAsDataURL(blob);
-      const audioBase64 = await base64Promise;
 
-      const res = await summarizeVoiceInspection(fieldId, { audioBase64, mimeType });
+    try {
+      const audioResult = await stopNativeOrWebRecording();
+      if (!audioResult || !audioResult.audioBase64) {
+        return;
+      }
+      if (!fieldId) return;
+
+      const res = await summarizeVoiceInspection(fieldId, {
+        audioBase64: audioResult.audioBase64,
+        mimeType: audioResult.mimeType,
+      });
+
       if (res.summary) {
         setNote((prev) => (prev ? `${prev}\n\n${res.summary}` : res.summary));
       }
