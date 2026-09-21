@@ -298,6 +298,52 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         cache_write.assert_not_called()
 
+    async def test_grid_repairs_missing_cells_from_partial_disk_cache(self):
+        observation = {
+            "date": "2026-09-01",
+            "periodEnd": "2026-09-10",
+            "ndviMean": 0.5,
+            "reliability": "high",
+        }
+        cells = [
+            {
+                "row": 0,
+                "col": i,
+                "areaHa": 10,
+                "boundary": [],
+                "centroid": {},
+                "observations": [observation] if i < 3 else [],
+            }
+            for i in range(4)
+        ]
+        partial_result = {
+            "coveragePercent": 75.0,
+            "cells": cells[:3],
+            "cellsInField": 4,
+        }
+        boundary = [
+            {"latitude": 53, "longitude": 69},
+            {"latitude": 54, "longitude": 69},
+            {"latitude": 54, "longitude": 70},
+        ]
+
+        def read_cache(kind, _key, _ttl):
+            return partial_result if kind == "grid" else copy.deepcopy(cells)
+
+        query = AsyncMock(return_value={"observations": [observation]})
+        with (
+            patch.object(copernicus, "_grid_cache", {}),
+            patch.object(copernicus, "_disk_cache_read", side_effect=read_cache),
+            patch.object(copernicus, "_disk_cache_write"),
+            patch.object(copernicus, "get_copernicus_token", AsyncMock(return_value="test")),
+            patch.object(copernicus, "query_sentinel_hub_statistical", query),
+        ):
+            result = await copernicus.fetch_field_risk_grid(boundary)
+
+        self.assertEqual(query.await_count, 1)
+        self.assertEqual(len(result["cells"]), 4)
+        self.assertEqual(result["coveragePercent"], 100.0)
+
     def test_gemini_fallback_is_strictly_sequential(self):
         active_requests = 0
         max_active_requests = 0

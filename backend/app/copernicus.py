@@ -970,6 +970,14 @@ def _raw_grid_key(boundary: list[dict[str, float]], cols: int, rows: int) -> str
     return f"raw_{cols}x{rows}|{pts}"
 
 
+def _grid_result_has_full_coverage(result: dict[str, Any] | None) -> bool:
+    """Only treat a rendered grid as final when virtually all field area is present."""
+    if not result:
+        return False
+    coverage = result.get("coveragePercent")
+    return isinstance(coverage, (int, float)) and coverage >= 99.0
+
+
 async def fetch_field_risk_grid(
     boundary: list[dict[str, float]],
     cols: int = 4,
@@ -988,11 +996,11 @@ async def fetch_field_risk_grid(
     now = time.time()
     result_key = _cache_key(boundary, cols, rows, target_date)
     cached = _grid_cache.get(result_key)
-    if cached and (now - cached[0]) < _GRID_TTL_SECONDS:
+    if cached and (now - cached[0]) < _GRID_TTL_SECONDS and _grid_result_has_full_coverage(cached[1]):
         return cached[1]
 
     disk_fresh = _disk_cache_read("grid", result_key, _GRID_TTL_SECONDS)
-    if disk_fresh:
+    if _grid_result_has_full_coverage(disk_fresh):
         _grid_cache[result_key] = (now, disk_fresh)
         return disk_fresh
 
@@ -1003,27 +1011,38 @@ async def fetch_field_risk_grid(
         # Treat that payload as a cache miss so the next opening retries immediately.
         raw_cells = None
 
-    if not raw_cells:
+    cells = raw_cells or _build_grid_cells(boundary, cols, rows)
+    if not cells:
+        return None
+
+    # A previous request may have cached 11-13 successful cells after several
+    # parallel Copernicus calls timed out. Repair only those gaps instead of
+    # accepting the partial grid for six hours or downloading all cells again.
+    missing_cells = [cell for cell in cells if not cell.get("observations")]
+    if missing_cells:
         token = await get_copernicus_token()
         if not token:
             stale = _disk_cache_read("grid", result_key, float("inf"))
             return {**stale, "stale": True} if stale else None
 
-        cells = _build_grid_cells(boundary, cols, rows)
-        if not cells:
-            return None
-
-        semaphore = asyncio.Semaphore(4)
+        semaphore = asyncio.Semaphore(2)
 
         async def sample(cell: dict[str, Any]) -> None:
-            try:
-                async with semaphore:
-                    series = await query_sentinel_hub_statistical(token, cell["boundary"])
-            except Exception:
-                series = None
-            cell["observations"] = series.get("observations", []) if series else []
+            observations: list[dict[str, Any]] = []
+            for attempt in range(2):
+                try:
+                    async with semaphore:
+                        series = await query_sentinel_hub_statistical(token, cell["boundary"])
+                    observations = series.get("observations", []) if series else []
+                except Exception:
+                    observations = []
+                if observations:
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+            cell["observations"] = observations
 
-        await asyncio.gather(*(sample(cell) for cell in cells))
+        await asyncio.gather(*(sample(cell) for cell in missing_cells))
         raw_cells = cells
         successful_cells = sum(bool(cell.get("observations")) for cell in raw_cells)
         if successful_cells >= max(2, math.ceil(len(raw_cells) * 0.5)):
