@@ -24,7 +24,10 @@ class VoiceInspectionTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
-        with patch("httpx.Client.post", return_value=mock_response):
+        with (
+            patch.object(ai_advisor, "GEMINI_API_KEYS", ["test-key"]),
+            patch("httpx.Client.post", return_value=mock_response),
+        ):
             result = ai_advisor.process_agronomic_voice_report(
                 audio_bytes=dummy_audio,
                 mime_type="audio/ogg",
@@ -146,4 +149,3 @@ class VoiceInspectionTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
