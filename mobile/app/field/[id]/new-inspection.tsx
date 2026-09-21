@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -15,7 +15,7 @@ import * as Location from 'expo-location';
 
 import { Card } from '../../../src/components/Card';
 import { Screen } from '../../../src/components/Screen';
-import { createInspection } from '../../../src/services/api';
+import { createInspection, summarizeVoiceInspection } from '../../../src/services/api';
 import { colors } from '../../../src/theme/colors';
 import { fontFamilies, typography } from '../../../src/theme/typography';
 
@@ -35,6 +35,111 @@ export default function NewInspectionScreen() {
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Voice recording state
+  const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<any>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  async function startVoiceRecording() {
+    if (recording || transcribing) return;
+    try {
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        Alert.alert('Запись недоступна', 'Микрофон не поддерживается в текущем браузере.');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mimeType =
+        typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : 'audio/ogg';
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (event: any) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track: any) => track.stop());
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        await handleAudioBlob(audioBlob, mimeType);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start(250);
+      setRecording(true);
+      setRecordingSeconds(0);
+      timerRef.current = setInterval(() => {
+        setRecordingSeconds((prev) => prev + 1);
+      }, 1000);
+    } catch {
+      Alert.alert('Доступ к микрофону', 'Разрешите доступ к микрофону для записи голосового осмотра.');
+    }
+  }
+
+  function stopVoiceRecording() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setRecording(false);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  }
+
+  async function handleAudioBlob(blob: Blob, mimeType: string) {
+    if (!fieldId) return;
+    setTranscribing(true);
+    try {
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve, reject) => {
+        reader.onloadend = () => {
+          resolve(reader.result as string);
+        };
+        reader.onerror = reject;
+      });
+      reader.readAsDataURL(blob);
+      const audioBase64 = await base64Promise;
+
+      const res = await summarizeVoiceInspection(fieldId, { audioBase64, mimeType });
+      if (res.summary) {
+        setNote((prev) => (prev ? `${prev}\n\n${res.summary}` : res.summary));
+      }
+    } catch (err) {
+      Alert.alert(
+        'AI-обработка',
+        err instanceof Error ? err.message : 'Не удалось обработать аудио. Попробуйте еще раз.'
+      );
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  async function aiStructureCurrentNote() {
+    if (!fieldId || !note.trim() || transcribing) return;
+    setTranscribing(true);
+    try {
+      const res = await summarizeVoiceInspection(fieldId, { textNotes: note.trim() });
+      if (res.summary) {
+        setNote(res.summary);
+      }
+    } catch (err) {
+      Alert.alert('AI-структурирование', err instanceof Error ? err.message : 'Не удалось обработать заметку.');
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
 
   useEffect(() => {
     if (targetLat && targetLng) {
@@ -185,6 +290,61 @@ export default function NewInspectionScreen() {
             </View>
           </Card>
         )}
+      </View>
+
+      {/* Voice / AI Inspection Section */}
+      <View style={styles.section}>
+        <View style={styles.voiceSectionHeader}>
+          <Text style={styles.sectionLabel}>ГОЛОСОВОЙ ОТЧЁТ (AI-АГРОНОМ)</Text>
+          {transcribing && (
+            <View style={styles.badgeRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.aiBadgeText}>AI анализирует...</Text>
+            </View>
+          )}
+        </View>
+
+        <Card style={styles.voiceCard}>
+          {recording ? (
+            <View style={styles.recordingBox}>
+              <View style={styles.recordingIndicatorRow}>
+                <View style={styles.pulsingDot} />
+                <Text style={styles.recordingTimerText}>
+                  Идёт запись: 00:{recordingSeconds < 10 ? `0${recordingSeconds}` : recordingSeconds}
+                </Text>
+              </View>
+              <Text style={styles.recordingHint}>
+                Говорите о фазе культуры, сорняках, влажности или обнаруженных угрозах...
+              </Text>
+              <Pressable onPress={stopVoiceRecording} style={styles.stopRecordingButton}>
+                <Text style={styles.stopRecordingText}>⏹️ Завершить и сформировать акт (AI)</Text>
+              </Pressable>
+            </View>
+          ) : transcribing ? (
+            <View style={styles.transcribingBox}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.transcribingText}>
+                🤖 AI-агроном расшифровывает аудио и составляет структурированный акт осмотра...
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.voiceIdleBox}>
+              <Text style={styles.voiceHint}>
+                Наговорите голосом обстановку на поле — AI-агроном Tanap AI выделит сорняки, фазу, влажность и заполнит акт:
+              </Text>
+              <View style={styles.voiceActionsRow}>
+                <Pressable onPress={startVoiceRecording} style={styles.voiceRecordButton}>
+                  <Text style={styles.voiceRecordButtonText}>🎙️ Наговорить голосом (AI)</Text>
+                </Pressable>
+                {note.trim().length > 3 && (
+                  <Pressable onPress={aiStructureCurrentNote} style={styles.voiceStructureButton}>
+                    <Text style={styles.voiceStructureButtonText}>✨ AI-структурировать</Text>
+                  </Pressable>
+                )}
+              </View>
+            </View>
+          )}
+        </Card>
       </View>
 
       {/* Note Section */}
@@ -400,6 +560,125 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.muted,
     lineHeight: 16,
+  },
+
+  // Voice Inspection Styles
+  voiceSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  aiBadgeText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 12,
+    color: colors.primary,
+  },
+  voiceCard: {
+    padding: 14,
+    backgroundColor: '#F0FDF4',
+    borderColor: '#BBF7D0',
+    borderWidth: 1,
+  },
+  recordingBox: {
+    gap: 10,
+    alignItems: 'center',
+  },
+  recordingIndicatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pulsingDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: colors.danger,
+  },
+  recordingTimerText: {
+    fontFamily: fontFamilies.bold,
+    fontSize: 15,
+    color: colors.danger,
+  },
+  recordingHint: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  stopRecordingButton: {
+    backgroundColor: colors.danger,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+  },
+  stopRecordingText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13.5,
+    color: '#FFFFFF',
+  },
+  transcribingBox: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    gap: 8,
+  },
+  transcribingText: {
+    fontFamily: fontFamilies.medium,
+    fontSize: 13,
+    color: colors.primaryDark,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  voiceIdleBox: {
+    gap: 10,
+  },
+  voiceHint: {
+    fontFamily: fontFamilies.regular,
+    fontSize: 12.5,
+    color: colors.textSecondary,
+    lineHeight: 17,
+  },
+  voiceActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  voiceRecordButton: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceRecordButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 13,
+    color: '#FFFFFF',
+  },
+  voiceStructureButton: {
+    backgroundColor: colors.surface,
+    borderColor: colors.primary,
+    borderWidth: 1,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceStructureButtonText: {
+    fontFamily: fontFamilies.semiBold,
+    fontSize: 12.5,
+    color: colors.primary,
   },
 
   // Submit Button

@@ -549,6 +549,22 @@ export async function syncOfflineQueue(): Promise<{ synced: number; failed: numb
   });
 }
 
+/**
+ * Submits recorded audio or note to AI-agronomist for structuring into a field inspection report
+ */
+export async function summarizeVoiceInspection(
+  fieldId: string,
+  params: { audioBase64?: string; mimeType?: string; textNotes?: string }
+): Promise<{ summary: string; fieldId: string }> {
+  return apiFetch<{ summary: string; fieldId: string }>(
+    `/api/fields/${encodeURIComponent(fieldId)}/voice-inspection-summary`,
+    {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Analytics (Offline Cache-First)
 // ---------------------------------------------------------------------------

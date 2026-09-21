@@ -55,6 +55,7 @@ from .yield_forecast import get_yield_forecast
 from .field_operations import build_operations_recommendation, fetch_operations_weather
 from .telegram_auth import validate_telegram_init_data
 from . import emailer
+from . import ai_advisor
 from starlette.concurrency import run_in_threadpool
 
 from .ai_advisor import (
@@ -66,6 +67,8 @@ from .ai_advisor import (
     count_seedlings_in_image_bytes,
     count_seedlings_in_video_bytes,
     count_seedlings_in_video_frames,
+    process_agronomic_voice_report,
+    process_agronomic_text_report,
     _query_gemini_chat,
 )
 
@@ -123,6 +126,12 @@ class ShareInviteInput(BaseModel):
     permissions: list[str] = PydanticField(default_factory=list)
     fieldScope: str = PydanticField(default="all", pattern="^(all|selected)$")
     fieldIds: list[str] = PydanticField(default_factory=list)
+
+
+class VoiceInspectionInput(BaseModel):
+    audioBase64: str | None = None
+    mimeType: str = "audio/webm"
+    textNotes: str | None = None
 
 
 class CreateProfileInput(BaseModel):
@@ -1012,6 +1021,30 @@ def _shared_field_rows(connection, share: dict) -> list:
     )
 
 
+def get_accessible_fields_for_user(connection, user_id: str) -> list[dict]:
+    """Returns all fields owned by user or shared with them via active profile_shares."""
+    rows = _fields_with_counts(connection, "WHERE f.user_id = ?", [user_id])
+    seen: set[str] = set()
+    result: list[dict] = []
+    for r in rows:
+        field = field_from_row(r)
+        if field["id"] not in seen:
+            seen.add(field["id"])
+            result.append(field)
+
+    shares = connection.execute(
+        "SELECT * FROM profile_shares WHERE grantee_id = ? AND status = 'active'",
+        (user_id,),
+    ).fetchall()
+    for s in shares:
+        for r in _shared_field_rows(connection, _share_from_row(s)):
+            field = field_from_row(r)
+            if field["id"] not in seen:
+                seen.add(field["id"])
+                result.append(field)
+    return result
+
+
 @app.get("/api/fields")
 def list_fields(profile_id: str | None = None, user_id: str = Depends(require_user)) -> list[dict]:
     with connect() as connection:
@@ -1026,16 +1059,8 @@ def list_fields(profile_id: str | None = None, user_id: str = Depends(require_us
                 rows = _shared_field_rows(connection, share) if share else []
             return [field_from_row(row) for row in rows]
 
-        # Без указания профиля — все свои поля + все доступные по шэрам.
-        rows = _fields_with_counts(connection, "WHERE f.user_id = ?", [user_id])
-        result = [field_from_row(r) for r in rows]
-        shares = connection.execute(
-            "SELECT * FROM profile_shares WHERE grantee_id = ? AND status = 'active'",
-            (user_id,),
-        ).fetchall()
-        for s in shares:
-            result.extend(field_from_row(r) for r in _shared_field_rows(connection, _share_from_row(s)))
-    return result
+        return get_accessible_fields_for_user(connection, user_id)
+
 
 
 @app.get("/api/profiles")
@@ -2080,6 +2105,63 @@ def delete_inspection(inspection_id: str, user_id: str = Depends(require_user)) 
         except OSError:
             # Запись уже удалена. Очистку повреждённого файла можно повторить отдельно.
             pass
+
+
+@app.post("/api/fields/{field_id}/voice-inspection-summary")
+async def summarize_voice_inspection(
+    field_id: str,
+    request: Request,
+    user_id: str = Depends(require_user),
+) -> dict:
+    with connect() as connection:
+        field_row, _is_owner, _perms = _load_accessible_field(connection, field_id, user_id, need="inspect")
+        field_data = field_from_row(field_row)
+
+    content_type = request.headers.get("content-type", "")
+    audio_bytes: bytes | None = None
+    mime_type = "audio/webm"
+    text_notes: str | None = None
+
+    if "application/json" in content_type:
+        body = await request.json()
+        b64 = body.get("audioBase64") or body.get("audio_base64")
+        text_notes = body.get("textNotes") or body.get("text_notes")
+        mime_type = body.get("mimeType") or body.get("mime_type") or "audio/webm"
+        if b64:
+            import base64
+            if "," in b64:
+                header, b64 = b64.split(",", 1)
+                if "audio/" in header:
+                    mime_type = header.split(";")[0].replace("data:", "")
+            try:
+                audio_bytes = base64.b64decode(b64)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Неверный формат base64 аудио")
+    else:
+        form = await request.form()
+        audio_field = form.get("audio") or form.get("file")
+        if audio_field and hasattr(audio_field, "read"):
+            audio_bytes = await audio_field.read()
+            mime_type = getattr(audio_field, "content_type", None) or "audio/webm"
+        text_notes = form.get("text_notes") or form.get("textNotes")
+
+    if not audio_bytes and text_notes:
+        summary = ai_advisor.process_agronomic_text_report(str(text_notes), field_context=field_data)
+        return {"summary": summary, "fieldId": field_id, "success": True}
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Аудиозапись не передана")
+
+    summary = ai_advisor.process_agronomic_voice_report(
+        audio_bytes=audio_bytes,
+        mime_type=mime_type,
+        field_context=field_data,
+    )
+    return {
+        "summary": summary,
+        "fieldId": field_id,
+        "success": True,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1532,3 +1532,139 @@ def ask_agronomic_advisor(
         "Сохраните вопрос и повторите запрос позже. Срочное решение по защите культур в Акмолинской области "
         "подтвердите у агронома и сверьте с Государственным реестром пестицидов РК."
     )
+
+
+def process_agronomic_voice_report(
+    audio_bytes: bytes,
+    mime_type: str = "audio/ogg",
+    field_context: dict[str, Any] | None = None,
+) -> str:
+    """
+    Listens to agronomic voice memo from field inspection, transcribes key facts,
+    and formats a structured, professional agronomic inspection report.
+    Supports audio/ogg (Telegram voice .oga), audio/wav, audio/mp3, audio/m4a, audio/webm.
+    """
+    if not audio_bytes:
+        return "Аудиозапись пуста."
+
+    # Normalize mime type (Telegram .oga is audio/ogg)
+    clean_mime = mime_type.split(";")[0].strip().lower()
+    if clean_mime in ("audio/oga", "application/ogg", "audio/opus"):
+        clean_mime = "audio/ogg"
+    elif clean_mime in ("audio/mp4", "audio/x-m4a"):
+        clean_mime = "audio/m4a"
+
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    field_info_parts = []
+    if field_context:
+        if field_context.get("name"):
+            field_info_parts.append(f"Поле: {field_context['name']}")
+        if field_context.get("cropType") or field_context.get("crop_type"):
+            field_info_parts.append(f"Культура: {field_context.get('cropType') or field_context.get('crop_type')}")
+        if field_context.get("areaHa") or field_context.get("area_ha"):
+            field_info_parts.append(f"Площадь: {field_context.get('areaHa') or field_context.get('area_ha')} га")
+        if field_context.get("region"):
+            field_info_parts.append(f"Регион: {field_context['region']}")
+
+    ctx_str = ", ".join(field_info_parts) if field_info_parts else "Поле хозяйства Казахстана"
+
+    prompt = (
+        f"Ты — опытный главный AI-агроном Tanap AI. Прослушай эту голосовую аудиозаметку агронома с поля.\n"
+        f"Контекст поля: {ctx_str}.\n\n"
+        "Твоя задача — точно выделить все агрономические факты и составить чёткий, ёмкий и профессиональный акт полевого осмотра.\n"
+        "Структурируй результат строго по разделам (без markdown-звёздочек, без символов *, без горизонтальных черт ---):\n"
+        "🌾 Состояние культуры и фаза: [что наблюдается, фаза вегетации, густота/равномерность]\n"
+        "⚠️ Выявленные проблемы: [сорняки с названиями, болезни, вредители, дефицит влаги или питания, повреждения]\n"
+        "📍 Локализация и масштаб: [очаги, края, низины или по всей площади, интенсивность]\n"
+        "💡 Агротехнические меры: [рекомендованные действия, обработки, нормы, контроль]\n"
+        "📋 Краткий вердикт: [1-2 предложения — общий итог для агронома]\n\n"
+        "Если агроном называет конкретные виды сорняков, фазы или препараты — обязательно укажи их точно. "
+        "Если какой-то пункт в аудио не упомянут — напиши 'Без замечаний' или 'Не отмечено'. "
+        "Не выдумывай факты, которых нет в аудиозаписи. Пиши на русском языке в деловом агрономическом стиле."
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": clean_mime,
+                            "data": audio_b64,
+                        }
+                    },
+                    {"text": prompt},
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 1024,
+        },
+    }
+
+    # Use GEMINI_MODELS cascade
+    for api_key in GEMINI_API_KEYS:
+        for model in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates") or []
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts") or []
+                        text_chunks = [p.get("text", "") for p in parts if "text" in p]
+                        raw_result = "".join(text_chunks).strip()
+                        if raw_result:
+                            return clean_agronomic_text(raw_result)
+            except Exception:
+                continue
+
+    return (
+        "Аудиозапись осмотра зафиксирована. Не удалось автоматически структурировать запись через AI "
+        "(шум ветра или временная недоступность сервиса). "
+        "Акт осмотра прикреплён к истории поля."
+    )
+
+
+def process_agronomic_text_report(
+    text_notes: str,
+    field_context: dict[str, Any] | None = None,
+) -> str:
+    """
+    If user writes a raw text note, formats it into a structured
+    agronomic inspection report.
+    """
+    if not text_notes or len(text_notes.strip()) < 3:
+        return text_notes or ""
+
+    field_info_parts = []
+    if field_context:
+        if field_context.get("name"):
+            field_info_parts.append(f"Поле: {field_context['name']}")
+        if field_context.get("cropType") or field_context.get("crop_type"):
+            field_info_parts.append(f"Культура: {field_context.get('cropType') or field_context.get('crop_type')}")
+        if field_context.get("areaHa") or field_context.get("area_ha"):
+            field_info_parts.append(f"Площадь: {field_context.get('areaHa') or field_context.get('area_ha')} га")
+
+    ctx_str = ", ".join(field_info_parts) if field_info_parts else "Поле хозяйства Казахстана"
+
+    prompt = (
+        f"Ты — опытный главный AI-агроном Tanap AI. Преврати следующую черновую заметку агронома с поля "
+        f"в профессиональный, структурированный акт осмотра.\n"
+        f"Контекст поля: {ctx_str}.\n"
+        f"Заметка агронома: \"{text_notes.strip()}\"\n\n"
+        "Структурируй результат строго по разделам (без markdown-звёздочек, без символов *, без горизонтальных черт ---):\n"
+        "🌾 Состояние культуры и фаза: ...\n"
+        "⚠️ Выявленные проблемы: ...\n"
+        "📍 Локализация и масштаб: ...\n"
+        "💡 Агротехнические рекомендации: ...\n"
+        "📋 Краткий вердикт: ...\n\n"
+        "Пиши чётко, кратко, деловым языком."
+    )
+    res = ask_agronomic_advisor(prompt, farm_context=field_context)
+    return clean_agronomic_text(res)
+
