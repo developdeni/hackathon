@@ -24,6 +24,7 @@ export type AppMapViewProps = {
   region?: Region;
   mapType?: string;
   onPress?: (event: MapPressEvent) => void;
+  onGestureActiveChange?: (active: boolean) => void;
   children?: React.ReactNode;
   [key: string]: any;
 };
@@ -84,6 +85,12 @@ function buildHtml(center: [number, number], zoom: number): string {
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19, attribution:'Esri · Maxar · Earthstar Geographics'}).addTo(map);
     var group = L.layerGroup().addTo(map);
     map.on('click', function(e){ post({type:'press', lat:e.latlng.lat, lng:e.latlng.lng}); });
+    // Signal RN the moment a finger lands on the map, so the parent ScrollView
+    // can release the gesture and let the map pan instead of scrolling the screen.
+    var el = map.getContainer();
+    el.addEventListener('touchstart', function(){ post({type:'gesture', active:true}); }, {passive:true});
+    el.addEventListener('touchend', function(){ post({type:'gesture', active:false}); }, {passive:true});
+    el.addEventListener('touchcancel', function(){ post({type:'gesture', active:false}); }, {passive:true});
     window.__apply = function(polys, marks){
       group.clearLayers();
       (polys||[]).forEach(function(p){
@@ -117,7 +124,7 @@ function buildHtml(center: [number, number], zoom: number): string {
 }
 
 const AppMapView = forwardRef<any, AppMapViewProps>(function AppMapView(props, ref) {
-  const { style, initialRegion, region: controlledRegion, onPress, children } = props;
+  const { style, initialRegion, region: controlledRegion, onPress, onGestureActiveChange, children } = props;
   const webRef = useRef<WebView>(null);
   const readyRef = useRef(false);
 
@@ -192,6 +199,8 @@ const AppMapView = forwardRef<any, AppMapViewProps>(function AppMapView(props, r
     if (data.type === 'ready') {
       readyRef.current = true;
       pushOverlays();
+    } else if (data.type === 'gesture') {
+      onGestureActiveChange?.(!!data.active);
     } else if (data.type === 'press') {
       onPress?.({ nativeEvent: { coordinate: { latitude: data.lat, longitude: data.lng } } });
     } else if (data.type === 'markerPress') {

@@ -50,7 +50,7 @@ except Exception:
 
 
 def _disk_cache_path(kind: str, key: str) -> Path:
-    digest = hashlib.sha1(("quality-v3|" + key).encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(("quality-v4|" + key).encode("utf-8")).hexdigest()
     return _DISK_CACHE_DIR / f"{kind}_{digest}.json"
 
 
@@ -998,6 +998,10 @@ async def fetch_field_risk_grid(
 
     raw_key = _raw_grid_key(boundary, cols, rows)
     raw_cells = _disk_cache_read("grid_raw", raw_key, _GRID_TTL_SECONDS)
+    if raw_cells and not any(c.get("observations") for c in raw_cells):
+        # A transient Copernicus failure used to cache an empty grid for six hours.
+        # Treat that payload as a cache miss so the next opening retries immediately.
+        raw_cells = None
 
     if not raw_cells:
         token = await get_copernicus_token()
@@ -1021,7 +1025,9 @@ async def fetch_field_risk_grid(
 
         await asyncio.gather(*(sample(cell) for cell in cells))
         raw_cells = cells
-        _disk_cache_write("grid_raw", raw_key, raw_cells)
+        successful_cells = sum(bool(cell.get("observations")) for cell in raw_cells)
+        if successful_cells >= max(2, math.ceil(len(raw_cells) * 0.5)):
+            _disk_cache_write("grid_raw", raw_key, raw_cells)
 
     # Calculate summaries across all intervals with sufficient spatial coverage
     cells = [dict(c) for c in raw_cells]

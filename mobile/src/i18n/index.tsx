@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type Lang = 'ru' | 'kk';
+export type Lang = 'ru' | 'kk' | 'en';
 
 const STORAGE_KEY = '@tanap/lang';
 
@@ -27,6 +27,24 @@ const ru: Dict = {
   'ai.herd.sub': 'Визуальная оценка числа видимых животных по фото стада или кадру с дрона.',
   'ai.chat.title': 'AI Агроном',
   'ai.chat.sub': 'Чат-консультант по агрономии Акмолинской области: болезни, СЗР, сроки, нормы.',
+  'ai.inputPlaceholder': 'Спросите агронома…',
+
+  // Voice AI-agronomist
+  'voice.listening': 'Слушаю…',
+  'voice.recognizing': 'Распознаю речь…',
+  'voice.thinking': 'Думаю…',
+  'voice.speaking': 'Отвечаю',
+  'voice.tapToSpeak': 'Нажмите, чтобы говорить',
+  'voice.hint': 'Просто говорите — я слушаю и отвечу голосом. Замолчите — отправлю вопрос сам.',
+  'voice.interrupt': 'Перебить',
+  'voice.end': 'Завершить',
+  'voice.micTitle': 'Доступ к микрофону',
+  'voice.micBody': 'Для голосового вопроса агроному нужен доступ к микрофону. Разрешите его в настройках.',
+  'voice.openSettings': 'Открыть настройки',
+  'voice.noAudioTitle': 'Запись не зафиксирована',
+  'voice.noAudioBody': 'Не удалось получить аудио. Попробуйте сказать ещё раз ближе к микрофону.',
+  'voice.errorTitle': 'Голосовой агроном',
+  'voice.errorBody': 'Не удалось обработать голос. Попробуйте ещё раз.',
 
   // Fields view
   'fields.title': 'Участки',
@@ -65,6 +83,7 @@ const ru: Dict = {
   'profile.linkTelegram.error': 'Не удалось создать код привязки. Повторите позже.',
   'lang.ru': 'Русский',
   'lang.kk': 'Қазақша',
+  'lang.en': 'English',
 
   // Profile editing
   'profile.edit': 'Редактировать профиль',
@@ -156,6 +175,24 @@ const kk: Dict = {
   'ai.herd.sub': 'Отар фотосы немесе дрон кадры бойынша көрінетін малдың визуалды бағасы.',
   'ai.chat.title': 'AI Агроном',
   'ai.chat.sub': 'Ақмола облысы агрономиясы бойынша чат-кеңесші: аурулар, ӨҚҚ, мерзімдер, нормалар.',
+  'ai.inputPlaceholder': 'Агрономнан сұраңыз…',
+
+  // Voice AI-agronomist
+  'voice.listening': 'Тыңдап тұрмын…',
+  'voice.recognizing': 'Сөзді тануда…',
+  'voice.thinking': 'Ойлануда…',
+  'voice.speaking': 'Жауап беруде',
+  'voice.tapToSpeak': 'Сөйлеу үшін басыңыз',
+  'voice.hint': 'Жай сөйлей беріңіз — тыңдап, дауыспен жауап беремін. Тынышталсаңыз, сұрақты өзім жіберемін.',
+  'voice.interrupt': 'Бөлу',
+  'voice.end': 'Аяқтау',
+  'voice.micTitle': 'Микрофонға рұқсат',
+  'voice.micBody': 'Дауыспен сұрақ қою үшін микрофонға рұқсат керек. Оны баптаулардан беріңіз.',
+  'voice.openSettings': 'Баптауларды ашу',
+  'voice.noAudioTitle': 'Жазба тіркелмеді',
+  'voice.noAudioBody': 'Аудио алынбады. Микрофонға жақынырақ қайта айтып көріңіз.',
+  'voice.errorTitle': 'Дауысты агроном',
+  'voice.errorBody': 'Дауысты өңдеу мүмкін болмады. Қайталап көріңіз.',
 
   'fields.title': 'Алқаптар',
   'fields.noProfile': 'Профиль таңдалмаған',
@@ -192,6 +229,7 @@ const kk: Dict = {
   'profile.linkTelegram.error': 'Байланыстыру кодын жасау мүмкін болмады. Кейінірек қайталаңыз.',
   'lang.ru': 'Русский',
   'lang.kk': 'Қазақша',
+  'lang.en': 'English',
 
   // Profile editing
   'profile.edit': 'Профильді өңдеу',
@@ -266,7 +304,151 @@ const kk: Dict = {
   'team.error': 'Сәтсіз аяқталды. Деректерді тексеріңіз.',
 };
 
-const TABLES: Record<Lang, Dict> = { ru, kk };
+const en: Dict = {
+  'nav.ai': 'AI Tools',
+  'nav.fields': 'Fields',
+  'nav.profile': 'Profile',
+
+  'ai.title': 'AI Tools',
+  'ai.subtitle': 'Tanap AI agronomist assistant',
+  'ai.photo.title': 'Photo recognition',
+  'ai.photo.sub': 'Visual hypothesis from a photo: diseases, pests and weeds. Not a lab diagnosis.',
+  'ai.count.title': 'Seedling & density count',
+  'ai.count.sub': 'Visual seedling count; density per m² only with a measured frame area.',
+  'ai.grain.title': 'Visual grain analysis',
+  'ai.grain.sub': 'Preliminary estimate of visible impurities and damage. Does not replace a lab.',
+  'ai.herd.title': 'Livestock headcount',
+  'ai.herd.sub': 'Visual estimate of visible animals from a herd photo or drone shot.',
+  'ai.chat.title': 'AI Agronomist',
+  'ai.chat.sub': 'Agronomy chat consultant for Akmola region: diseases, crop protection, timing, rates.',
+  'ai.inputPlaceholder': 'Ask the agronomist…',
+
+  // Voice AI-agronomist
+  'voice.listening': 'Listening…',
+  'voice.recognizing': 'Recognizing speech…',
+  'voice.thinking': 'Thinking…',
+  'voice.speaking': 'Answering',
+  'voice.tapToSpeak': 'Tap to speak',
+  'voice.hint': 'Just speak — I listen and reply by voice. Pause and I send your question automatically.',
+  'voice.interrupt': 'Interrupt',
+  'voice.end': 'End',
+  'voice.micTitle': 'Microphone access',
+  'voice.micBody': 'A voice question to the agronomist needs microphone access. Please allow it in settings.',
+  'voice.openSettings': 'Open settings',
+  'voice.noAudioTitle': 'No recording captured',
+  'voice.noAudioBody': 'Could not capture audio. Try speaking again closer to the microphone.',
+  'voice.errorTitle': 'Voice agronomist',
+  'voice.errorBody': 'Could not process the voice. Please try again.',
+
+  'fields.title': 'Fields',
+  'fields.noProfile': 'No profile selected',
+  'fields.online': 'Online',
+  'fields.offline': 'Offline',
+  'fields.stat.fields': 'fields',
+  'fields.stat.ha': 'ha',
+  'fields.stat.inspections': 'inspections',
+  'fields.add': 'Add field',
+  'fields.refresh': 'Refresh',
+  'fields.listLabel': 'FIELD LIST',
+  'fields.holdToDelete': 'hold to delete',
+  'fields.empty.title': 'No fields in this profile',
+  'fields.empty.sub': 'Add your first field manually or detect the outline from Sentinel-2 satellite.',
+  'fields.addProfile': '+ profile',
+
+  'profile.title': 'My profile',
+  'profile.subtitle': 'Agronomist account',
+  'profile.newProfile': '+ Create a new farm profile',
+  'profile.accountData': 'ACCOUNT DATA',
+  'profile.stat.fields': 'fields',
+  'profile.stat.ha': 'ha',
+  'profile.stat.inspections': 'inspections',
+  'profile.stat.profiles': 'profiles',
+  'profile.account': 'ACCOUNT',
+  'profile.email': 'Email',
+  'profile.org': 'Organization',
+  'profile.region': 'Region',
+  'profile.registered': 'Registration date',
+  'profile.logout': 'Log out',
+  'profile.language': 'LANGUAGE',
+  'profile.linkTelegram': 'Link Telegram',
+  'profile.linkTelegram.sub': 'Open the bot and link your account in one tap',
+  'profile.linkTelegram.error': 'Could not create a linking code. Try again later.',
+  'lang.ru': 'Русский',
+  'lang.kk': 'Қазақша',
+  'lang.en': 'English',
+
+  'profile.edit': 'Edit profile',
+  'profile.emailVerified': 'verified',
+  'profile.emailUnverified': 'not verified',
+  'edit.title': 'Editing',
+  'edit.section.info': 'PERSONAL DETAILS',
+  'edit.section.email': 'EMAIL',
+  'edit.name': 'Name',
+  'edit.org': 'Organization',
+  'edit.region': 'Region',
+  'edit.email': 'Email',
+  'edit.namePlaceholder': 'Your name',
+  'edit.orgPlaceholder': 'Farm name',
+  'edit.regionPlaceholder': 'Region / district',
+  'edit.save': 'Save changes',
+  'edit.saved': 'Profile updated',
+  'edit.error': 'Could not save. Please try again.',
+  'edit.changeEmail': 'Change email',
+  'edit.verifyEmail': 'Verify email',
+  'edit.newEmail': 'New email',
+  'edit.emailNote': 'A 6-digit verification code will be sent to this address.',
+  'edit.sendCode': 'Send code',
+  'edit.sending': 'Sending…',
+  'edit.codeSentTo': 'Code sent to',
+  'edit.enterCode': 'Code from the email',
+  'edit.confirm': 'Confirm',
+  'edit.confirming': 'Checking…',
+  'edit.emailConfirmed': 'Email verified',
+  'edit.codeError': 'Invalid or expired code.',
+  'edit.cancel': 'Cancel',
+  'edit.devCodeNote': 'Sender email not configured. Verification code:',
+  'edit.invalidEmail': 'Enter a valid email',
+
+  'profile.myId': 'YOUR ID',
+  'profile.idHint': 'Give this ID to the owner so they can grant you access',
+  'profile.copied': 'ID copied',
+  'profile.team': 'Team & access',
+  'profile.invitations': 'Invitations',
+  'invite.from': 'Invited by',
+  'invite.accept': 'Accept',
+  'invite.decline': 'Decline',
+  'invite.wholeProfile': 'whole profile',
+  'invite.selectedFields': 'selected fields',
+  'role.owner': 'Owner',
+  'role.member': 'Member',
+  'team.title': 'Team',
+  'team.subtitle': 'Grant access to the profile and fields',
+  'team.chooseProfile': 'PROFILE',
+  'team.invite': 'INVITE BY ID',
+  'team.idPlaceholder': 'Member ID, e.g. TA-AB3D9K',
+  'team.permissions': 'WHAT TO ALLOW',
+  'team.perm.view': 'View and analytics',
+  'team.perm.ai': 'AI tools',
+  'team.perm.edit': 'Add and edit fields',
+  'team.perm.inspect': 'Inspections, agro passport, export',
+  'team.scope': 'FIELD ACCESS',
+  'team.scope.all': 'All fields in the profile',
+  'team.scope.selected': 'Selected fields',
+  'team.send': 'Send invitation',
+  'team.sent': 'Invitation sent',
+  'team.members': 'MEMBERS & INVITATIONS',
+  'team.empty': 'No one yet. Invite by ID above.',
+  'team.statusPending': 'awaiting acceptance',
+  'team.statusActive': 'active',
+  'team.revoke': 'Remove',
+  'team.leave': 'Leave profile',
+  'team.onlyOwner': 'Only the profile owner can invite members',
+  'team.notFound': 'No user found with this ID',
+  'team.selectFields': 'Select fields',
+  'team.error': 'Failed. Check the details.',
+};
+
+const TABLES: Record<Lang, Dict> = { ru, kk, en };
 
 type I18nValue = {
   lang: Lang;
@@ -287,7 +469,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       try {
         const saved = await AsyncStorage.getItem(STORAGE_KEY);
-        if (saved === 'ru' || saved === 'kk') setLangState(saved);
+        if (saved === 'ru' || saved === 'kk' || saved === 'en') setLangState(saved);
       } catch {
         // ignore — default ru
       }

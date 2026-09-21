@@ -749,7 +749,7 @@ export async function diagnoseCropPhoto(
       body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
     },
     35_000,
-    1 // retry once on failure
+    0
   );
   if (res) {
     if (res.object_name) res.object_name = cleanAiText(res.object_name);
@@ -782,7 +782,7 @@ export async function countSeedlingsPhoto(
       }),
     },
     35_000,
-    1 // retry once on failure
+    0
   );
   if (res) {
     if (res.crop) res.crop = cleanAiText(res.crop);
@@ -805,7 +805,7 @@ export async function countLivestock(
       body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
     },
     40_000,
-    1
+    0
   );
   if (res) {
     if (res.dominant_species) res.dominant_species = cleanAiText(res.dominant_species);
@@ -828,7 +828,7 @@ export async function analyzeGrainQuality(
       body: JSON.stringify({ photo_base64: cleanBase64, photo_name: photoName }),
     },
     35_000,
-    1
+    0
   );
   if (res) {
     if (res.crop) res.crop = cleanAiText(res.crop);
@@ -888,10 +888,40 @@ export async function askAiAgronomist(
       }),
     },
     35_000,
-    1 // retry once on failure
+    0
   );
 
   return cleanAiText(res.answer);
+}
+
+// Voice AI-agronomist: send a spoken question (ru/kk); backend transcribes it and answers.
+export async function askAiAgronomistVoice(
+  audioBase64: string,
+  mimeType: string,
+  history?: AiChatMessage[],
+  farmContext?: any
+): Promise<{ question: string; answer: string }> {
+  const historyPayload = history?.slice(-30).map((m) => ({
+    role: m.sender === 'user' ? 'user' : 'model',
+    text: cleanAiText(m.text),
+  }));
+
+  const res = await apiFetch<{ question: string; answer: string }>(
+    '/api/ai/chat/voice',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioBase64,
+        mimeType,
+        history: historyPayload,
+        farm_context: farmContext,
+      }),
+    },
+    60_000
+  );
+
+  return { question: res.question, answer: cleanAiText(res.answer) };
 }
 
 export async function loadAiChatHistory(): Promise<AiChatMessage[]> {

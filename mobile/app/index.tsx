@@ -42,6 +42,7 @@ import {
   analyzeGrainQuality,
   countLivestock,
   askAiAgronomist,
+  askAiAgronomistVoice,
   loadAiChatHistory,
   saveAiChatHistory,
   clearAiChatHistory,
@@ -56,6 +57,19 @@ import type { ProfileShare } from '../src/types/domain';
 import { getLocalCache, getMemoryCache } from '../src/services/offline';
 import { notify, confirmDestructive } from '../src/utils/notify';
 import { useI18n } from '../src/i18n';
+import {
+  checkMicrophonePermission,
+  startNativeOrWebRecording,
+  stopNativeOrWebRecording,
+  cancelNativeOrWebRecording,
+} from '../src/services/voice-recorder';
+import { speakAnswer, speakAsync, stopSpeaking } from '../src/services/speech';
+import {
+  startConversation,
+  stopConversation,
+  interruptAndListen,
+  type VoicePhase,
+} from '../src/services/voice-conversation';
 import { colors } from '../src/theme/colors';
 import { fontFamilies } from '../src/theme/typography';
 import { FarmProfile, Field, AiDiagnosisResult, AiStandCountResult, AiGrainQualityResult, AiLivestockResult, AiChatMessage, AiFarmSummary, AiFieldBadge } from '../src/types/domain';
@@ -729,7 +743,7 @@ function AiToolsView({
   targetField?: Field | null;
   onClearTargetField?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const insets = useSafeAreaInsets();
   const [viewMode, setViewMode] = useState<AiViewMode>('menu');
 
@@ -769,6 +783,16 @@ function AiToolsView({
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isAnswering, setIsAnswering] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  // Hands-free voice conversation mode
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voicePhase, setVoicePhase] = useState<VoicePhase>('idle');
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [voiceLastQ, setVoiceLastQ] = useState('');
+  const [voiceLastA, setVoiceLastA] = useState('');
+  const messagesRef = useRef<AiChatMessage[]>([]);
   const chatListRef = useRef<FlatList<AiChatMessage>>(null);
   const inputRef = useRef<NativeTextInput>(null);
 
@@ -1201,6 +1225,153 @@ function AiToolsView({
   };
 
   useEffect(() => {
+    return () => {
+      cancelNativeOrWebRecording().catch(() => {});
+      stopSpeaking();
+    };
+  }, []);
+
+  const speakMessage = (msg: AiChatMessage) => {
+    speakAnswer(msg.text, lang, {
+      onStart: () => setSpeakingId(msg.id),
+      onDone: () => setSpeakingId((cur) => (cur === msg.id ? null : cur)),
+      onError: () => setSpeakingId((cur) => (cur === msg.id ? null : cur)),
+    });
+  };
+
+  const toggleSpeak = (msg: AiChatMessage) => {
+    if (speakingId === msg.id) {
+      stopSpeaking();
+      setSpeakingId(null);
+    } else {
+      speakMessage(msg);
+    }
+  };
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const startVoiceMode = async () => {
+    if (isRecording || isTranscribing) return;
+    const perm = await checkMicrophonePermission();
+    if (!perm.granted) {
+      Alert.alert(t('voice.micTitle'), t('voice.micBody'), [
+        { text: t('edit.cancel'), style: 'cancel' },
+        { text: t('voice.openSettings'), onPress: () => Linking.openSettings().catch(() => {}) },
+      ]);
+      return;
+    }
+    stopSpeaking();
+    setVoiceLastQ('');
+    setVoiceLastA('');
+    setVoiceMode(true);
+    try {
+      await startConversation({
+        onPhase: setVoicePhase,
+        onLevel: setVoiceLevel,
+        sendUtterance: async (audioBase64, mimeType) => {
+          const history = messagesRef.current.filter((m) => m.id !== 'welcome').slice(-30);
+          return askAiAgronomistVoice(audioBase64, mimeType, history, farmContext || {});
+        },
+        speak: (text) => speakAsync(text, lang),
+        stopSpeak: () => stopSpeaking(),
+        onExchange: (question, answer) => {
+          setVoiceLastQ(question);
+          setVoiceLastA(answer);
+          const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const userMsg: AiChatMessage = { id: `user_${Date.now()}`, sender: 'user', text: question, timestamp: now };
+          const aiMsg: AiChatMessage = { id: `ai_${Date.now() + 1}`, sender: 'ai', text: cleanAiText(answer), timestamp: now };
+          const updated = [...messagesRef.current, userMsg, aiMsg];
+          messagesRef.current = updated;
+          setMessages(updated);
+          void saveAiChatHistory(updated);
+        },
+        onError: () => {},
+      });
+    } catch (err: any) {
+      setVoiceMode(false);
+      Alert.alert(t('voice.errorTitle'), err?.message || t('voice.errorBody'));
+    }
+  };
+
+  const exitVoiceMode = () => {
+    stopConversation();
+    setVoiceMode(false);
+    setVoicePhase('idle');
+    setVoiceLevel(0);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopConversation();
+    };
+  }, []);
+
+  const startVoiceQuestion = async () => {
+    if (isRecording || isTranscribing || isAnswering) return;
+    stopSpeaking();
+    setSpeakingId(null);
+    try {
+      const perm = await checkMicrophonePermission();
+      if (!perm.granted) {
+        Alert.alert(
+          t('voice.micTitle'),
+          t('voice.micBody'),
+          [
+            { text: t('edit.cancel'), style: 'cancel' },
+            { text: t('voice.openSettings'), onPress: () => Linking.openSettings().catch(() => {}) },
+          ],
+        );
+        return;
+      }
+      await startNativeOrWebRecording();
+      setIsRecording(true);
+    } catch (err: any) {
+      Alert.alert(t('voice.micTitle'), err?.message || t('voice.micBody'));
+    }
+  };
+
+  const stopVoiceQuestion = async () => {
+    if (!isRecording) return;
+    setIsRecording(false);
+    setIsTranscribing(true);
+    try {
+      const audio = await stopNativeOrWebRecording();
+      if (!audio || !audio.audioBase64) {
+        Alert.alert(t('voice.noAudioTitle'), t('voice.noAudioBody'));
+        return;
+      }
+
+      const priorHistory = messages.filter((m) => m.id !== 'welcome').slice(-30);
+      const { question, answer } = await askAiAgronomistVoice(
+        audio.audioBase64,
+        audio.mimeType,
+        priorHistory,
+        farmContext || {},
+      );
+
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const userMsg: AiChatMessage = { id: `user_${Date.now()}`, sender: 'user', text: question, timestamp: now };
+      const aiMsg: AiChatMessage = { id: `ai_${Date.now() + 1}`, sender: 'ai', text: cleanAiText(answer), timestamp: now };
+      const updated = [...messages, userMsg, aiMsg];
+      setMessages(updated);
+      void saveAiChatHistory(updated);
+      // Voice-in → voice-out: speak the AI answer aloud automatically.
+      speakMessage(aiMsg);
+    } catch (err: any) {
+      Alert.alert(t('voice.errorTitle'), err?.message || t('voice.errorBody'));
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  const cancelVoiceQuestion = async () => {
+    setIsRecording(false);
+    await cancelNativeOrWebRecording().catch(() => {});
+  };
+
+  useEffect(() => {
     if (externalPrompt) {
       setViewMode('chat');
       const timer = setTimeout(() => {
@@ -1307,18 +1478,35 @@ function AiToolsView({
           >
             {cleanAiText(msg.text)}
           </Text>
-          <Text
-            style={[
-              styles.aiBubbleTime,
-              isUser ? styles.aiBubbleTimeUser : styles.aiBubbleTimeAi,
-            ]}
-          >
-            {msg.timestamp}
-          </Text>
+          <View style={styles.aiBubbleFooter}>
+            <Text
+              style={[
+                styles.aiBubbleTime,
+                isUser ? styles.aiBubbleTimeUser : styles.aiBubbleTimeAi,
+              ]}
+            >
+              {msg.timestamp}
+            </Text>
+            {!isUser && !isError && (
+              <Pressable
+                onPress={() => toggleSpeak(msg)}
+                hitSlop={8}
+                accessibilityLabel={speakingId === msg.id ? 'Остановить озвучку' : 'Озвучить ответ'}
+                style={styles.speakBtn}
+              >
+                <SymbolView
+                  name={speakingId === msg.id ? 'stop.circle.fill' : 'speaker.wave.2.fill'}
+                  size={16}
+                  tintColor={speakingId === msg.id ? '#E5484D' : colors.primary}
+                  fallback={<Text style={{ fontSize: 14 }}>{speakingId === msg.id ? '■' : '🔊'}</Text>}
+                />
+              </Pressable>
+            )}
+          </View>
         </View>
       </View>
     );
-  }, []);
+  }, [speakingId, lang]);
 
   if (viewMode === 'menu') {
     return <ToolMenu onSelect={setViewMode} />;
@@ -2155,40 +2343,179 @@ function AiToolsView({
           { paddingBottom: kbHeight > 0 ? kbHeight + 8 : Math.max(insets.bottom, 10) },
         ]}
       >
+        {isRecording ? (
+          <View style={styles.voiceBanner}>
+            <View style={styles.voiceDot} />
+            <Text style={styles.voiceBannerText}>{t('voice.listening')}</Text>
+            <Pressable onPress={() => void cancelVoiceQuestion()} hitSlop={10}>
+              <Text style={styles.voiceCancel}>{t('edit.cancel')}</Text>
+            </Pressable>
+          </View>
+        ) : isTranscribing ? (
+          <View style={styles.voiceBanner}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.voiceBannerText}>{t('voice.recognizing')}</Text>
+          </View>
+        ) : null}
         <View style={styles.aiInputBar}>
           <TextInput
             ref={inputRef}
             style={styles.aiTextInput}
-            placeholder="Спросите агронома…"
+            placeholder={isRecording ? t('voice.listening') : t('ai.inputPlaceholder')}
             accessibilityLabel="Сообщение агроному"
             placeholderTextColor={colors.muted}
             value={inputText}
             onChangeText={setInputText}
             multiline
             maxLength={500}
-            editable={!isAnswering}
+            editable={!isAnswering && !isRecording && !isTranscribing}
             onSubmitEditing={() => handleSendMessage()}
             blurOnSubmit={false}
           />
-          <Pressable
-            style={({ pressed }) => [
-              styles.aiSendButton,
-              !canSend && styles.aiSendButtonDisabled,
-              pressed && canSend && styles.pressed,
-            ]}
-            onPress={() => handleSendMessage()}
-            accessibilityRole="button"
-            accessibilityLabel="Отправить сообщение"
-            disabled={!canSend}
-          >
-            <SymbolView
-              name="arrow.up"
-              size={18}
-              tintColor="#FFFFFF"
-              fallback={<Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>↑</Text>}
-            />
-          </Pressable>
+          {inputText.trim() ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.aiSendButton,
+                !canSend && styles.aiSendButtonDisabled,
+                pressed && canSend && styles.pressed,
+              ]}
+              onPress={() => handleSendMessage()}
+              accessibilityRole="button"
+              accessibilityLabel="Отправить сообщение"
+              disabled={!canSend}
+            >
+              <SymbolView
+                name="arrow.up"
+                size={18}
+                tintColor="#FFFFFF"
+                fallback={<Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>↑</Text>}
+              />
+            </Pressable>
+          ) : (
+            <Pressable
+              style={({ pressed }) => [
+                styles.aiSendButton,
+                isTranscribing && styles.aiSendButtonDisabled,
+                pressed && styles.pressed,
+              ]}
+              onPress={() => void startVoiceMode()}
+              accessibilityRole="button"
+              accessibilityLabel="Голосовой режим"
+              disabled={isTranscribing || isAnswering}
+            >
+              <SymbolView
+                name="mic.fill"
+                size={18}
+                tintColor="#FFFFFF"
+                fallback={<Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>🎤</Text>}
+              />
+            </Pressable>
+          )}
         </View>
+      </View>
+
+      {voiceMode && (
+        <VoiceOverlay
+          phase={voicePhase}
+          level={voiceLevel}
+          lastQuestion={voiceLastQ}
+          lastAnswer={voiceLastA}
+          onInterrupt={interruptAndListen}
+          onClose={exitVoiceMode}
+          t={t}
+        />
+      )}
+    </View>
+  );
+}
+
+function VoiceOverlay({
+  phase,
+  level,
+  lastQuestion,
+  lastAnswer,
+  onInterrupt,
+  onClose,
+  t,
+}: {
+  phase: VoicePhase;
+  level: number;
+  lastQuestion: string;
+  lastAnswer: string;
+  onInterrupt: () => void;
+  onClose: () => void;
+  t: (k: string) => string;
+}) {
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (phase === 'listening' || phase === 'speaking') {
+      const anim = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulse, { toValue: 1.18, duration: 700, useNativeDriver: true }),
+          Animated.timing(pulse, { toValue: 1, duration: 700, useNativeDriver: true }),
+        ]),
+      );
+      anim.start();
+      return () => anim.stop();
+    }
+    pulse.setValue(1);
+  }, [phase, pulse]);
+
+  const orbScale = phase === 'listening' ? 1 + level * 0.5 : 1;
+  const statusText =
+    phase === 'listening'
+      ? t('voice.listening')
+      : phase === 'thinking'
+        ? t('voice.thinking')
+        : phase === 'speaking'
+          ? t('voice.speaking')
+          : t('voice.tapToSpeak');
+  const orbColor = phase === 'speaking' ? '#2E7D32' : phase === 'thinking' ? '#A86F19' : colors.primary;
+
+  return (
+    <View style={styles.voiceOverlay}>
+      <View style={styles.voiceOverlayTop}>
+        <Text style={styles.voiceTitle}>{t('ai.chat.title')}</Text>
+        <Text style={styles.voiceStatus}>{statusText}</Text>
+      </View>
+
+      <View style={styles.voiceOrbWrap}>
+        <View style={[styles.voiceOrb, { backgroundColor: orbColor, transform: [{ scale: orbScale }] }]}>
+          <Animated.View style={[styles.voiceOrbInner, { transform: [{ scale: pulse }] }]}>
+            {phase === 'thinking' ? (
+              <ActivityIndicator size="large" color="#fff" />
+            ) : (
+              <Text style={styles.voiceOrbIcon}>{phase === 'speaking' ? '🔊' : '🎤'}</Text>
+            )}
+          </Animated.View>
+        </View>
+      </View>
+
+      <View style={styles.voiceTranscript}>
+        {!!lastQuestion && (
+          <Text style={styles.voiceQ} numberOfLines={2}>
+            {lastQuestion}
+          </Text>
+        )}
+        {!!lastAnswer && (
+          <Text style={styles.voiceA} numberOfLines={6}>
+            {cleanAiText(lastAnswer)}
+          </Text>
+        )}
+        {!lastQuestion && !lastAnswer && (
+          <Text style={styles.voiceHint}>{t('voice.hint')}</Text>
+        )}
+      </View>
+
+      <View style={styles.voiceControls}>
+        {phase === 'speaking' && (
+          <Pressable style={styles.voiceInterruptBtn} onPress={onInterrupt}>
+            <Text style={styles.voiceInterruptText}>{t('voice.interrupt')}</Text>
+          </Pressable>
+        )}
+        <Pressable style={styles.voiceCloseBtn} onPress={onClose}>
+          <Text style={styles.voiceCloseText}>{t('voice.end')}</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -2790,6 +3117,14 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
           <Text style={[styles.langLabel, lang === 'kk' && styles.langLabelActive]}>{t('lang.kk')}</Text>
           {lang === 'kk' ? <Text style={styles.langCheck}>✓</Text> : null}
         </Pressable>
+        <View style={styles.rowDivider} />
+        <Pressable
+          onPress={() => setLang('en')}
+          style={({ pressed }) => [styles.langRow, pressed && styles.pressed]}
+        >
+          <Text style={[styles.langLabel, lang === 'en' && styles.langLabelActive]}>{t('lang.en')}</Text>
+          {lang === 'en' ? <Text style={styles.langCheck}>✓</Text> : null}
+        </Pressable>
       </Card>
 
       {/* Link Telegram — hidden inside the Mini App and once already linked */}
@@ -2847,7 +3182,7 @@ function ProfileView({ user, isLoading, onLogout, onNewProfile }: ProfileViewPro
         <View style={styles.rowDivider} />
         <InfoRow
           label={t('profile.registered')}
-          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : 'ru-RU', {
+          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : lang === 'en' ? 'en-US' : 'ru-RU', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',
@@ -2890,6 +3225,18 @@ const WEB_ICON_PATHS: Record<string, string[]> = {
   'arrow.up.right': ['M7 17L17 7', 'M8 7h9v9'],
 };
 
+const ANDROID_ICON_EMOJIS: Record<string, string> = {
+  cpu: '🤖',
+  'square.grid.2x2': '🗺️',
+  'person.crop.circle': '👤',
+  sparkles: '✨',
+  'arrow.clockwise': '↺',
+  leaf: '🌿',
+  'arrow.up.right': '↗',
+  'chevron.right': '›',
+  'chevron.left': '‹',
+};
+
 function AppIcon({
   name,
   size = 20,
@@ -2899,6 +3246,14 @@ function AppIcon({
   size?: number;
   color?: string;
 }) {
+  if (Platform.OS === 'android') {
+    const emoji = ANDROID_ICON_EMOJIS[name as string];
+    return (
+      <Text style={{ fontSize: size * 0.85, lineHeight: size * 1.1, color, textAlign: 'center' }}>
+        {emoji ?? '•'}
+      </Text>
+    );
+  }
   if (Platform.OS === 'web') {
     const paths = WEB_ICON_PATHS[name as string];
     if (paths) {
@@ -4180,6 +4535,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textSecondary,
   },
+  aiBubbleFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 2,
+  },
   aiBubbleTime: {
     fontFamily: fontFamilies.medium,
     fontSize: 10,
@@ -4190,6 +4552,110 @@ const styles = StyleSheet.create({
   },
   aiBubbleTimeAi: {
     color: colors.muted,
+  },
+  speakBtn: {
+    padding: 2,
+  },
+
+  /* Hands-free voice overlay */
+  voiceOverlay: {
+    position: 'absolute',
+    top: 0, right: 0, bottom: 0, left: 0,
+    backgroundColor: '#071221',
+    zIndex: 99999,
+    elevation: 99,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 72,
+    paddingBottom: 48,
+    paddingHorizontal: 24,
+  },
+  voiceOverlayTop: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  voiceTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontFamily: fontFamilies.semiBold,
+  },
+  voiceStatus: {
+    color: '#7FD1A2',
+    fontSize: 15,
+    fontFamily: fontFamilies.medium,
+  },
+  voiceOrbWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceOrb: {
+    width: 180,
+    height: 180,
+    borderRadius: 90,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceOrbInner: {
+    width: 132,
+    height: 132,
+    borderRadius: 66,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceOrbIcon: {
+    fontSize: 52,
+  },
+  voiceTranscript: {
+    minHeight: 96,
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 8,
+  },
+  voiceQ: {
+    color: '#CFE9DA',
+    fontSize: 16,
+    fontFamily: fontFamilies.semiBold,
+    textAlign: 'center',
+  },
+  voiceA: {
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  voiceHint: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  voiceControls: {
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+  },
+  voiceInterruptBtn: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+  },
+  voiceInterruptText: {
+    color: '#fff',
+    fontSize: 15,
+    fontFamily: fontFamilies.semiBold,
+  },
+  voiceCloseBtn: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+    backgroundColor: '#E5484D',
+  },
+  voiceCloseText: {
+    color: '#fff',
+    fontSize: 15,
+    fontFamily: fontFamilies.semiBold,
   },
 
   /* Input Bar — pinned to bottom */
@@ -4246,6 +4712,33 @@ const styles = StyleSheet.create({
     backgroundColor: colors.border,
     shadowOpacity: 0,
     elevation: 0,
+  },
+  aiMicButtonActive: {
+    backgroundColor: '#E5484D',
+  },
+  voiceBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 6,
+    paddingBottom: 10,
+  },
+  voiceDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#E5484D',
+  },
+  voiceBannerText: {
+    flex: 1,
+    fontSize: 14,
+    color: colors.textSecondary,
+    fontFamily: fontFamilies.medium,
+  },
+  voiceCancel: {
+    fontSize: 14,
+    color: '#E5484D',
+    fontFamily: fontFamilies.semiBold,
   },
 
 

@@ -1,4 +1,4 @@
-import { ComponentProps, useEffect, useMemo, useRef, useState } from 'react';
+import { ComponentProps, ComponentRef, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -28,10 +28,11 @@ const CROP_SUGGESTIONS = ['Яровая пшеница', 'Ячмень', 'Рап
 
 export default function NewFieldScreen() {
   const router = useRouter();
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<ComponentRef<typeof MapView>>(null);
   const { profileId, fieldId } = useLocalSearchParams<{ profileId?: string; fieldId?: string }>();
   const isEditing = Boolean(fieldId);
 
+  const [mapActive, setMapActive] = useState(false);
   const [name, setName] = useState('');
   const [cropType, setCropType] = useState('');
   const [centerLat, setCenterLat] = useState(formatCoord(DEFAULT_CENTER.latitude));
@@ -359,7 +360,7 @@ export default function NewFieldScreen() {
 
   return (
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <Screen contentStyle={styles.content}>
+      <Screen contentStyle={styles.content} scrollEnabled={!mapActive}>
         <View style={styles.titleBlock}>
           <Text style={styles.title}>{isEditing ? 'Редактировать поле' : 'Новое поле'}</Text>
           <Text style={styles.subtitle}>Контур пашни можно распознать по снимку или уточнить вручную.</Text>
@@ -435,6 +436,7 @@ export default function NewFieldScreen() {
               style={styles.map}
               initialRegion={mapRegion}
               onPress={handleMapPress}
+              onGestureActiveChange={setMapActive}
               mapType={mapType}
               showsUserLocation
               showsMyLocationButton={false}

@@ -57,6 +57,8 @@ export default function MyProfileScreen() {
         <LangOption code="ru" label={t('lang.ru')} active={lang === 'ru'} onPress={setLang} />
         <View style={styles.rowDivider} />
         <LangOption code="kk" label={t('lang.kk')} active={lang === 'kk'} onPress={setLang} />
+        <View style={styles.rowDivider} />
+        <LangOption code="en" label={t('lang.en')} active={lang === 'en'} onPress={setLang} />
       </Card>
 
       {/* Account info */}
@@ -70,7 +72,7 @@ export default function MyProfileScreen() {
         <View style={styles.rowDivider} />
         <InfoRow
           label={t('profile.registered')}
-          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : 'ru-RU', {
+          value={new Date(user.createdAt).toLocaleDateString(lang === 'kk' ? 'kk-KZ' : lang === 'en' ? 'en-US' : 'ru-RU', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',

@@ -34,9 +34,59 @@ GEMINI_API_KEYS = _parse_gemini_keys()
 
 
 def _gemini_model_urls(models: list[str]):
-    for api_key in GEMINI_API_KEYS:
-        for model_name in models:
+    # Try the fastest model with every key before moving to a slower model.
+    # Only one HTTP request is active at a time.
+    for model_name in models:
+        for api_key in GEMINI_API_KEYS:
             yield api_key, model_name, f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+
+def _model_url(model_name: str, api_key: str) -> str:
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+
+def _extract_gemini_text(data: dict) -> str | None:
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _sequential_gemini_text(
+    payload: dict,
+    urls: list[str],
+    per_timeout: float = 7.0,
+    total_timeout: float = 20.0,
+    min_len: int = 10,
+) -> str | None:
+    """
+    Sends exactly one Gemini request at a time. A timeout, quota response or invalid
+    answer advances to the next URL (normally the same fast model on another key).
+    The shared deadline prevents a long chain of unavailable keys from blocking UI.
+    """
+    if not urls:
+        return None
+
+    deadline = time.monotonic() + total_timeout
+    for url in urls:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.5:
+            break
+        request_timeout = min(per_timeout, remaining)
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(request_timeout, connect=min(3.0, request_timeout))
+            ) as client:
+                resp = client.post(url, json=payload)
+            if resp.status_code == 200:
+                text = _extract_gemini_text(resp.json())
+                if text and len(text) >= min_len:
+                    return text
+        except Exception:
+            continue
+    return None
 
 
 # Каскад моделей Google Gemini. ВАЖНО: быстрые и стабильные *-flash-lite идут
@@ -44,18 +94,17 @@ def _gemini_model_urls(models: list[str]):
 # и отвечают 6-30 с — из-за этого чат «висел» и обрывался. Они оставлены только как
 # резерв в самом конце каскада. lite-модели отвечают за ~1-4 с и не перегружены.
 GEMINI_MODELS = [
-    "gemini-flash-lite-latest",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-flash-latest",
+    "gemini-flash-lite-latest",  # ~5 с, стабильно 200
+    "gemini-3.1-flash-lite",     # ~12 с, рабочая, но медленнее — резерв
+    "gemini-flash-latest",       # 503 отдаёт быстро — безвредный резерв
     "gemini-3.7-flash",
     "gemini-3.6-flash",
 ]
-# Фото-диагностика: тот же принцип — сначала быстрые/стабильные lite-модели,
-# тяжёлые flash-модели в резерве, чтобы 503 на них не стопорил распознавание.
+# ВНИМАНИЕ: gemini-3.5-flash-lite УБРАНА — она регулярно ВИСИТ 25+ с без ответа
+# (не 503, а полный таймаут), из-за чего чат тормозил до 18-21 с. Не возвращать.
+# Фото-диагностика: тот же принцип — быстрые lite первыми.
 VISION_MODELS = [
     "gemini-flash-lite-latest",
-    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-flash-latest",
     "gemini-3.7-flash",
@@ -1462,44 +1511,101 @@ def _query_gemini_chat(
         if system_context and system_context.strip():
             system_instruction_text += "\n\n" + system_context.strip()
 
+        base_gen = {
+            "temperature": 0.3,
+            "maxOutputTokens": 800,
+        }
+        # КЛЮЧЕВОЕ ДЛЯ СКОРОСТИ: без ограничения модель «размышляет» 13-15 с перед
+        # ответом (в ответе есть thoughtSignature). thinkingBudget=128 срезает время
+        # думанья: полный экспертный ответ (2500+ символов) выходит за ~5 с, а не 15.
         payload = {
             "contents": contents,
-            "systemInstruction": {
-                "parts": [{"text": system_instruction_text}]
-            },
-            "generationConfig": {
-                "temperature": 0.3,
-                # Больше бюджета вывода — чтобы экспертный ответ не обрывался на
-                # полуслове (это и есть «качество»). Быстрая lite-модель уверенно
-                # выдаёт полные ответы в 3000+ символов за ~5-7 с.
-                "maxOutputTokens": 1400,
-            },
+            "systemInstruction": {"parts": [{"text": system_instruction_text}]},
+            "generationConfig": {**base_gen, "thinkingConfig": {"thinkingBudget": 128}},
+        }
+        # Payload без thinkingConfig — для тяжёлых резервных моделей, которые могут
+        # не поддерживать этот параметр (иначе 400).
+        payload_no_think = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": system_instruction_text}]},
+            "generationConfig": base_gen,
         }
 
-        # Общий дедлайн на весь каскад, чтобы чат никогда не «висел» 30 с и не
-        # обрывался на клиенте. Быстрые lite-модели укладываются в ~1-4 с; если
-        # какая-то модель тормозит или отдаёт 503 — быстро уходим к следующей.
-        deadline = time.monotonic() + 20.0
-        for _api_key, model_name, url in _gemini_model_urls(GEMINI_MODELS):
-            remaining = deadline - time.monotonic()
-            if remaining <= 1.0:
-                break
-            try:
-                request_timeout = min(remaining, 14.0)
-                with httpx.Client(
-                    timeout=httpx.Timeout(request_timeout, connect=min(4.0, request_timeout))
-                ) as client:
-                    resp = client.post(url, json=payload)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        if len(text) > 10:
-                            return clean_agronomic_text(text)
-            except Exception:
-                continue
+        keys = GEMINI_API_KEYS
+        # One request at a time: preferred key first, then backup keys using the
+        # same fast model. This avoids multiplying load when Gemini is busy.
+        primary_urls = [_model_url("gemini-flash-lite-latest", key) for key in keys]
+        text = _sequential_gemini_text(
+            payload,
+            primary_urls,
+            per_timeout=11.0,
+            total_timeout=24.0,
+        )
+        if text:
+            return clean_agronomic_text(text)
+
+        # One short model fallback after all keys on the preferred model fail.
+        fallback_urls = [_model_url("gemini-3.1-flash-lite", key) for key in keys]
+        text = _sequential_gemini_text(
+            payload_no_think,
+            fallback_urls,
+            per_timeout=5.0,
+            total_timeout=8.0,
+        )
+        if text:
+            return clean_agronomic_text(text)
     except Exception:
         pass
 
+    return None
+
+
+def transcribe_voice_question(
+    audio_bytes: bytes,
+    mime_type: str = "audio/m4a",
+) -> str | None:
+    """
+    Transcribes a spoken agronomy question (Russian or Kazakh) into plain text,
+    keeping the original spoken language. Returns clean text or None on failure.
+    Used by the voice AI-agronomist chat: the transcript becomes the user's question.
+    """
+    if not audio_bytes or not GEMINI_API_KEYS:
+        return None
+
+    clean_mime = mime_type.split(";")[0].strip().lower()
+    if clean_mime in ("audio/oga", "application/ogg", "audio/opus"):
+        clean_mime = "audio/ogg"
+    elif clean_mime in ("audio/mp4", "audio/x-m4a"):
+        clean_mime = "audio/m4a"
+
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    prompt = (
+        "Точно расшифруй эту голосовую запись в текст. Пользователь задаёт вопрос агроному "
+        "на русском или казахском языке. Сохрани язык оригинала. Верни ТОЛЬКО сам текст вопроса, "
+        "без пояснений, без кавычек, без префиксов. Если речь неразборчива — верни пустую строку."
+    )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"inline_data": {"mime_type": clean_mime, "data": audio_b64}},
+                    {"text": prompt},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512},
+    }
+
+    urls = [_model_url("gemini-flash-lite-latest", key) for key in GEMINI_API_KEYS]
+    text = _sequential_gemini_text(
+        payload,
+        urls,
+        per_timeout=11.0,
+        total_timeout=24.0,
+        min_len=2,
+    )
+    if text:
+        return text.strip().strip('"').strip("«»").strip() or None
     return None
 
 
@@ -1667,4 +1773,3 @@ def process_agronomic_text_report(
     )
     res = ask_agronomic_advisor(prompt, farm_context=field_context)
     return clean_agronomic_text(res)
-

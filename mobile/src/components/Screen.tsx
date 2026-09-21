@@ -6,15 +6,17 @@ import { colors } from '../theme/colors';
 
 type Props = PropsWithChildren<{
   contentStyle?: ViewStyle;
+  scrollEnabled?: boolean;
 }>;
 
-export function Screen({ children, contentStyle }: Props) {
+export function Screen({ children, contentStyle, scrollEnabled = true }: Props) {
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <ScrollView
         contentContainerStyle={[styles.content, contentStyle]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        scrollEnabled={scrollEnabled}
       >
         {children}
       </ScrollView>

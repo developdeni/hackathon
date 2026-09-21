@@ -392,6 +392,7 @@ export default function FieldScreen() {
   const [operations, setOperations] = useState<FieldOperationsRecommendation | null>(initialOperations);
   const [mapMode, setMapMode] = useState<MapMode>('zones');
   const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+  const [mapActive, setMapActive] = useState(false);
   const [selectedZone, setSelectedZone] = useState<RiskZone | null>(initialZones?.zones?.[0] ?? null);
   const [selectedPeriod, setSelectedPeriod] = useState<string | null>(null); // null = default (latest from backend)
   const [periodLoading, setPeriodLoading] = useState(false);
@@ -618,7 +619,7 @@ export default function FieldScreen() {
           </View>
         </View>
       )}
-      <Screen contentStyle={styles.content}>
+      <Screen contentStyle={styles.content} scrollEnabled={!mapActive}>
 
       {/* ── 1. OVERVIEW CARD ───────────────────────────────────── */}
       <Card style={styles.overviewCard}>
@@ -1152,7 +1153,7 @@ export default function FieldScreen() {
       </View>
 
       <View style={styles.mapFrame}>
-        <MapView style={styles.map} initialRegion={region} mapType={mapType}>
+        <MapView style={styles.map} initialRegion={region} mapType={mapType} onGestureActiveChange={setMapActive}>
             <Polygon
               coordinates={field.boundary}
               fillColor={mapMode === 'boundary' ? 'rgba(30,126,52,0.10)' : 'rgba(30,126,52,0.04)'}

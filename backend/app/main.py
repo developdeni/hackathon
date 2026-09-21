@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import asyncio
+import base64
 import csv
 import hashlib
 import io
@@ -69,6 +70,7 @@ from .ai_advisor import (
     count_seedlings_in_video_frames,
     process_agronomic_voice_report,
     process_agronomic_text_report,
+    transcribe_voice_question,
     _query_gemini_chat,
 )
 
@@ -2418,6 +2420,44 @@ async def ai_agronomic_chat(input_data: AiChatInput) -> dict:
         farm_ctx,
     )
     return {"question": input_data.question, "answer": answer}
+
+
+class AiVoiceChatInput(BaseModel):
+    audioBase64: str
+    mimeType: str = "audio/m4a"
+    history: list[dict] | None = None
+    farm_context: Any | None = None
+
+
+@app.post("/api/ai/chat/voice")
+async def ai_agronomic_chat_voice(input_data: AiVoiceChatInput) -> dict:
+    """Voice AI-agronomist: transcribe a spoken question (ru/kk), then answer it."""
+    b64 = input_data.audioBase64 or ""
+    mime_type = input_data.mimeType or "audio/m4a"
+    if "," in b64 and b64.strip().startswith("data:"):
+        header, b64 = b64.split(",", 1)
+        if "audio/" in header:
+            mime_type = header.split(";")[0].replace("data:", "").strip()
+
+    try:
+        audio_bytes = base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Неверный формат аудио")
+    if not audio_bytes or len(audio_bytes) < 32:
+        raise HTTPException(status_code=400, detail="Аудиозапись пуста")
+
+    question = await run_in_threadpool(transcribe_voice_question, audio_bytes, mime_type)
+    if not question or not question.strip():
+        raise HTTPException(status_code=422, detail="Не удалось распознать речь. Повторите ближе к микрофону.")
+
+    chat_result = await ai_agronomic_chat(
+        AiChatInput(
+            question=question.strip(),
+            history=input_data.history,
+            farm_context=input_data.farm_context,
+        )
+    )
+    return {"question": question.strip(), "answer": chat_result["answer"], "transcribed": True}
 
 
 @app.get("/{full_path:path}")

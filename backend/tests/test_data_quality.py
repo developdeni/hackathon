@@ -3,7 +3,7 @@ import io
 import csv
 import unittest
 from datetime import date, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
@@ -283,6 +283,59 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["cells"]), 2)
         self.assertAlmostEqual(result["coveragePercent"], 66.7)
 
+    async def test_grid_does_not_cache_empty_copernicus_responses(self):
+        cells = [{"row": 0, "col": i, "areaHa": 10, "boundary": [], "centroid": {}} for i in range(3)]
+        boundary = [{"latitude": 53, "longitude": 69}, {"latitude": 54, "longitude": 69}, {"latitude": 54, "longitude": 70}]
+        cache_write = MagicMock()
+        with patch.object(copernicus, "_grid_cache", {}), patch.object(
+            copernicus, "_disk_cache_read", return_value=None
+        ), patch.object(copernicus, "_disk_cache_write", cache_write), patch.object(
+            copernicus, "get_copernicus_token", AsyncMock(return_value="test")
+        ), patch.object(copernicus, "_build_grid_cells", return_value=copy.deepcopy(cells)), patch.object(
+            copernicus, "query_sentinel_hub_statistical", AsyncMock(return_value=None)
+        ):
+            result = await copernicus.fetch_field_risk_grid(boundary)
+        self.assertIsNone(result)
+        cache_write.assert_not_called()
+
+    def test_gemini_fallback_is_strictly_sequential(self):
+        active_requests = 0
+        max_active_requests = 0
+        requested_urls = []
+
+        class FakeResponse:
+            def __init__(self, status_code, text=None):
+                self.status_code = status_code
+                self._text = text
+
+            def json(self):
+                return {"candidates": [{"content": {"parts": [{"text": self._text}]}}]}
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def post(self, url, json):
+                nonlocal active_requests, max_active_requests
+                active_requests += 1
+                max_active_requests = max(max_active_requests, active_requests)
+                requested_urls.append(url)
+                active_requests -= 1
+                return FakeResponse(503 if len(requested_urls) == 1 else 200, "Готовый ответ")
+
+        with patch.object(ai_advisor.httpx, "Client", FakeClient):
+            result = ai_advisor._sequential_gemini_text({}, ["primary", "backup"], total_timeout=5)
+
+        self.assertEqual(result, "Готовый ответ")
+        self.assertEqual(requested_urls, ["primary", "backup"])
+        self.assertEqual(max_active_requests, 1)
+
     def test_clean_agronomic_text_strips_asterisks_and_triple_dashes(self):
         raw = "--- \n**Рекомендация:**\n* Внести карбамид\n---\n*Норма:* 15 кг/га"
         cleaned = ai_advisor.clean_agronomic_text(raw)
@@ -412,4 +465,3 @@ class ExportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res_peak["observationDate"], "2026-07-15")
             self.assertEqual(res_peak["meanNdvi"], 0.75)
             self.assertEqual(res_peak["periodMode"], "peak")
-

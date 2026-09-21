@@ -10,20 +10,36 @@ import {
 } from 'react-native';
 import { fontFamilies } from '../theme/typography';
 
-// Keep existing font tokens compatible while rendering native system typography.
 function systemTypography(style: TextProps['style']): TextStyle {
   const flat = StyleSheet.flatten(style);
-  const weights: Record<string, TextStyle['fontWeight']> = {
-    [fontFamilies.regular]: '400',
-    [fontFamilies.medium]: '500',
-    [fontFamilies.semiBold]: '600',
-    [fontFamilies.bold]: '700',
+  if (Platform.OS === 'ios') {
+    const weights: Record<string, TextStyle['fontWeight']> = {
+      [fontFamilies.regular]: '400',
+      [fontFamilies.medium]: '500',
+      [fontFamilies.semiBold]: '600',
+      [fontFamilies.bold]: '700',
+    };
+    return {
+      fontFamily: 'System',
+      fontWeight: flat?.fontWeight ?? weights[flat?.fontFamily ?? ''] ?? '400',
+      letterSpacing: 0,
+    };
+  }
+  if (Platform.OS === 'web') {
+    return {
+      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
+      letterSpacing: 0,
+    };
+  }
+  // Android — use Montserrat (loaded via useFonts in _layout.tsx)
+  const fontMap: Record<string, string> = {
+    [fontFamilies.regular]: 'Montserrat_400Regular',
+    [fontFamilies.medium]: 'Montserrat_500Medium',
+    [fontFamilies.semiBold]: 'Montserrat_600SemiBold',
+    [fontFamilies.bold]: 'Montserrat_700Bold',
   };
-  return {
-    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif', default: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif' }),
-    fontWeight: flat?.fontWeight ?? weights[flat?.fontFamily ?? ''] ?? '400',
-    letterSpacing: 0,
-  };
+  const resolvedFont = flat?.fontFamily ? (fontMap[flat.fontFamily] ?? flat.fontFamily) : 'Montserrat_400Regular';
+  return { fontFamily: resolvedFont };
 }
 
 // Единая точка отключения системного масштабирования шрифта (Dynamic Type /
